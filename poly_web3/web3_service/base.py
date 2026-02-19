@@ -6,6 +6,7 @@
 # @Software: PyCharm
 from typing import Any
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
+import re
 
 from py_builder_relayer_client.client import RelayClient
 from py_clob_client.client import ClobClient
@@ -34,6 +35,9 @@ from poly_web3.log import logger
 
 
 class BaseWeb3Service:
+    RELAYER_DAILY_SUBMIT_LIMIT = 100
+    RELAYER_RECOMMENDED_SUBMIT_INTERVAL_MINUTES = 15
+
     def __init__(
             self,
             clob_client: ClobClient = None,
@@ -110,7 +114,7 @@ class BaseWeb3Service:
             positions = response.json()
             return [i for i in positions if i.get("percentPnl") > 0]
         except Exception as e:
-            print(f"Failed to fetch positions from API: {e}")
+            logger.error(f"Failed to fetch positions from API: {e}")
             return []
 
     def is_condition_resolved(self, condition_id: str) -> bool:
@@ -318,6 +322,41 @@ class BaseWeb3Service:
             RELAYER_URL + GET_RELAY_PAYLOAD,
             params={"address": address, "type": wallet_type},
         ).json()
+
+    @classmethod
+    def _raise_relayer_quota_exceeded_if_needed(cls, error_payload: Any):
+        if error_payload is None:
+            return
+        if isinstance(error_payload, dict):
+            raw_error = (
+                str(error_payload.get("error"))
+                if error_payload.get("error") is not None
+                else str(error_payload.get("message") or error_payload)
+            )
+        else:
+            raw_error = str(error_payload)
+
+        if "quota exceeded" not in raw_error.lower():
+            return
+
+        reset_seconds = cls._extract_quota_reset_seconds(raw_error)
+        reset_hint = ""
+        if reset_seconds is not None:
+            reset_hint = f" 当前剩余额度将在约 {reset_seconds} 秒后重置。"
+        raise Exception(
+            "Polymarket relayer 提交配额已超限：每天最多提交 "
+            f"{cls.RELAYER_DAILY_SUBMIT_LIMIT} 次。"
+            "建议降低调用频率（例如每 "
+            f"{cls.RELAYER_RECOMMENDED_SUBMIT_INTERVAL_MINUTES} 分钟最多执行 1 次）。"
+            f"{reset_hint} 原始错误: {raw_error}"
+        )
+
+    @staticmethod
+    def _extract_quota_reset_seconds(raw_error: str) -> int | None:
+        match = re.search(r"resets in (\d+) seconds", raw_error, re.IGNORECASE)
+        if not match:
+            return None
+        return int(match.group(1))
 
     def get_contract_config(self) -> dict:
         if self.clob_client.chain_id == 137:

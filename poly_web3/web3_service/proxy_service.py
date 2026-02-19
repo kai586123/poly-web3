@@ -117,6 +117,17 @@ class ProxyWeb3Service(BaseWeb3Service):
         response = requests.post(
             RELAYER_URL + SUBMIT_TRANSACTION, json=req, headers=headers
         ).json()
+        self._raise_relayer_quota_exceeded_if_needed(response)
+        if response.get("error"):
+            raise Exception(
+                "Relayer submit transaction failed: "
+                f"{response.get('error')}"
+            )
+        if not response.get("transactionID"):
+            raise Exception(
+                "Relayer submit transaction failed: transactionID missing, "
+                f"response={response}"
+            )
         redeem_res = self.relayer_client.poll_until_state(
             transaction_id=response["transactionID"],
             states=[STATE_MINED, STATE_CONFIRMED],

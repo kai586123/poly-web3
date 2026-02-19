@@ -22,8 +22,14 @@ class SafeWeb3Service(BaseWeb3Service):
     ) -> dict | None:
         if self.relayer_client is None:
             raise Exception("relayer_client not found")
-        resp = self.relayer_client.execute(txs, metadata)
-        return resp.wait()
+        try:
+            resp = self.relayer_client.execute(txs, metadata)
+            result = resp.wait()
+        except Exception as exc:
+            self._raise_relayer_quota_exceeded_if_needed(exc)
+            raise
+        self._raise_relayer_quota_exceeded_if_needed(result)
+        return result
 
     def _submit_redeem(self, txs: list[SafeTransaction]) -> dict | None:
         return self._submit_transactions(txs, "redeem")
