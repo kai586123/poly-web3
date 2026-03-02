@@ -1,6 +1,6 @@
 [project]
 name = "poly-web3"
-version = "1.0.3"
+version = "1.0.4"
 description = "Polymarket Proxy wallet redeem SDK - Execute redeem operations on Polymarket using proxy wallets"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -23,6 +23,11 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: Internet :: WWW/HTTP",
+]
+
+[project.optional-dependencies]
+analysis = [
+    "analysis-poly @ git+https://github.com/tosmart01/poly-analysis.git",
 ]
 
 [format]

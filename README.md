@@ -8,8 +8,10 @@ Python SDK for redeeming and splitting/merging Polymarket positions via Proxy/Sa
 
 [English](README.md) | [中文](README.zh.md)
 
+Optional address analysis is available for trading fee impact and PnL curves. See [Address Analysis (Optional)](#address-analysis-optional).
+
 ```bash
-Python >= 3.11
+# required Python >= 3.11
 pip install poly-web3
 ```
 
@@ -79,6 +81,35 @@ Or using uv:
 
 ```bash
 uv add poly-web3
+```
+
+Install with analysis support:
+
+```bash
+pip install "poly-web3[analysis]"
+```
+
+### Address Analysis (Optional)
+
+You can optionally analyze one address for:
+- Trading fee impact (`Net PnL` vs `No-Fee PnL`)
+- PnL curve and ratio/metrics visualization
+
+![PnL Curve](assets/pnl.png)
+![Ratio Metrics](assets/ratio.png)
+
+#### Address Analysis CLI
+
+After installing `poly-web3[analysis]`, you can run:
+
+```bash
+analysis-poly-open --address 0xabc --symbols btc,eth --intervals 5,15
+```
+
+Or start the base service:
+
+```bash
+analysis-poly
 ```
 
 ## Requirements

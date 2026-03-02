@@ -8,6 +8,8 @@ Polymarket Proxy 与 Safe 钱包赎回与拆分/合并仓位的 Python SDK，免
 
 [English](README.md) | 中文
 
+可选支持地址分析（手续费影响与盈亏曲线），见 [地址分析（可选）](#地址分析可选)。
+
 ```bash
 Python >= 3.11
 pip install poly-web3
@@ -81,6 +83,35 @@ pip install poly-web3
 
 ```bash
 uv add poly-web3
+```
+
+安装分析能力（extra）：
+
+```bash
+pip install "poly-web3[analysis]"
+```
+
+### 地址分析（可选）
+
+安装 `poly-web3[analysis]` 后，可直接对地址进行：
+- 手续费影响分析（`Net PnL` vs `No-Fee PnL`）
+- 盈亏曲线与收益比率指标可视化
+
+![盈亏曲线](assets/pnl.png)
+![比率指标](assets/ratio.png)
+
+#### 地址分析命令行
+
+安装 `poly-web3[analysis]` 后可直接执行：
+
+```bash
+analysis-poly-open --address 0xabc --symbols btc,eth --intervals 5,15
+```
+
+或者启动基础服务：
+
+```bash
+analysis-poly
 ```
 
 ## 环境要求
