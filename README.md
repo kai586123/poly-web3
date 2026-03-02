@@ -89,29 +89,6 @@ Install with analysis support:
 pip install "poly-web3[analysis]"
 ```
 
-### Address Analysis (Optional)
-
-You can optionally analyze one address for:
-- Trading fee impact (`Net PnL` vs `No-Fee PnL`)
-- PnL curve and ratio/metrics visualization
-
-![PnL Curve](assets/pnl.png)
-![Ratio Metrics](assets/ratio.png)
-
-#### Address Analysis CLI
-
-After installing `poly-web3[analysis]`, you can run:
-
-```bash
-analysis-poly-open --address 0xabc --symbols btc,eth --intervals 5,15
-```
-
-Or start the base service:
-
-```bash
-analysis-poly
-```
-
 ## Requirements
 
 - Python >= 3.11
@@ -206,6 +183,29 @@ merge_result = service.merge(
     1.5,
 )
 print(f"Merge result: {merge_result}")
+```
+
+### Address Analysis (Optional)
+
+You can optionally analyze one address for:
+- Trading fee impact (`Net PnL` vs `No-Fee PnL`)
+- PnL curve and ratio/metrics visualization
+
+![PnL Curve](assets/pnl.png)
+![Ratio Metrics](assets/ratio.png)
+
+#### Address Analysis CLI
+
+After installing `poly-web3[analysis]`, you can run:
+
+```bash
+analysis-poly-open --address 0xabc --symbols btc,eth --intervals 5,15
+```
+
+Or start the base service:
+
+```bash
+analysis-poly
 ```
 
 ## API Documentation

@@ -91,29 +91,6 @@ uv add poly-web3
 pip install "poly-web3[analysis]"
 ```
 
-### 地址分析（可选）
-
-安装 `poly-web3[analysis]` 后，可直接对地址进行：
-- 手续费影响分析（`Net PnL` vs `No-Fee PnL`）
-- 盈亏曲线与收益比率指标可视化
-
-![盈亏曲线](assets/pnl.png)
-![比率指标](assets/ratio.png)
-
-#### 地址分析命令行
-
-安装 `poly-web3[analysis]` 后可直接执行：
-
-```bash
-analysis-poly-open --address 0xabc --symbols btc,eth --intervals 5,15
-```
-
-或者启动基础服务：
-
-```bash
-analysis-poly
-```
-
 ## 环境要求
 
 - Python >= 3.11
@@ -207,6 +184,29 @@ merge_result = service.merge(
     1.5,
 )
 print(f"合并结果: {merge_result}")
+```
+
+### 地址分析（可选）
+
+安装 `poly-web3[analysis]` 后，可直接对地址进行：
+- 手续费影响分析（`Net PnL` vs `No-Fee PnL`）
+- 盈亏曲线与收益比率指标可视化
+
+![盈亏曲线](assets/pnl.png)
+![比率指标](assets/ratio.png)
+
+#### 地址分析命令行
+
+安装 `poly-web3[analysis]` 后可直接执行：
+
+```bash
+analysis-poly-open --address 0xabc --symbols btc,eth --intervals 5,15
+```
+
+或者启动基础服务：
+
+```bash
+analysis-poly
 ```
 
 ## API 文档
