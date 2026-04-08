@@ -31,6 +31,7 @@ reports/
 reports/*.json
 reports/*.csv
 .cache/
+.data/
 analysis_poly/reports/
 analysis_poly/.cache/
 

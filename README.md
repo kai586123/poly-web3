@@ -36,9 +36,13 @@ pip show poly-web3 analysis_poly
 
 ---
 
-## 二、克隆本仓库后的本地安装（推荐）
+## 二、克隆本仓库后如何使用（不污染系统 Python）
 
 **要求：** Python **>= 3.11**
+
+本仓库的**推荐用法**是：只把**第三方依赖**装进虚拟环境（`requirements.txt`），**不要把本项目做成 pip 包**（不使用 `pip install -e .` / `pip install .`）。在本目录运行时代码时，用 **`PYTHONPATH`** 指向仓库根目录即可导入 `poly_web3`、`analysis_poly` 等。
+
+### 推荐步骤
 
 ```bash
 git clone https://github.com/kai586123/poly-web3.git
@@ -49,52 +53,87 @@ python3.11 -m venv .venv
 source .venv/bin/activate
 
 pip install -U pip
-pip install -e ".[dev]"
+pip install -r requirements.txt
+# 开发 / 跑测试时可选：pip install -r requirements-dev.txt
+
+export PYTHONPATH="${PWD}:${PYTHONPATH}"
 ```
 
-安装完成后，控制台会提供（与 `pyproject.toml` 中 `[project.scripts]` 一致）：
+之后可直接：
 
-| 命令 | 说明 |
-|------|------|
-| `analysis-poly` | 仅启动 Web 服务（默认绑定 `0.0.0.0:8000`） |
-| `analysis-poly-open` | 启动服务并在浏览器打开，可附带分析参数 |
+```bash
+python main.py
+# 或（等价于曾经的 analysis-poly / analysis-poly-open 命令行入口，但不依赖 pip 安装本仓库）
+./scripts/analysis-poly
+./scripts/analysis-poly-open --address 0x你的地址 --symbols btc --intervals 5,15
+```
+
+亦可用模块方式（同样需已 `export PYTHONPATH` 且当前目录为仓库根）：
+
+```bash
+python -m analysis_poly.cli
+python -m analysis_poly.open_with_params --help
+```
+
+在任意脚本里引用 SDK：
+
+```python
+import sys
+sys.path.insert(0, "/path/to/poly-web3")
+from poly_web3 import PolyWeb3Service
+```
 
 **修改前端资源：** 若你改动了 `frontend/src/`，请在仓库根目录执行 `npm install && npm run build`，以刷新 `analysis_poly/static/dist/` 下的打包文件。
 
-**与 PyPI 包的区别：** `pip install poly-web3` 通常对应已发布的 **SDK wheel**；要从本仓库获得 **完整** `poly_web3` + `analysis_poly` + `poly_position_watcher`，请使用上面的 **`pip install -e .`**。
+### 关于「完全不使用 pip」
+
+**做不到**在仍从 PyPI 拉取依赖的前提下，完全跳过 `pip`（或同类工具）：`web3`、`pydantic` 等必须先安装到**某个**解释器环境里。若坚持零 pip，只能自行把依赖 wheel **vendor 进仓库**并改 `PYTHONPATH`，维护成本很高，本项目不提供。
+
+`pip install -r requirements.txt` **只会**安装 `requirements.txt` 里的第三方包，**不会**把本仓库安装成 site-packages 里的一个发行版，因此满足「不采用 pip 安装本项目的模式」。
+
+### 与 `pyproject.toml` / PyPI 的关系
+
+`pyproject.toml` 仍用于声明元数据；发布到 PyPI 的安装方式与上述「仅克隆 + requirements」并行存在。日常开发可只认 **`requirements.txt`**。
 
 ---
 
 ## 三、分析与缓存、报告目录说明
 
-分析器会将 **市场元数据缓存**、**按地址聚合的市场结果缓存** 等写入本机目录；**导出报告**默认在用户数据目录下。逻辑见 `analysis_poly/storage_paths.py`。
+分析器将缓存与报告写在磁盘上；逻辑见 `analysis_poly/storage_paths.py`。
+
+### 默认：从源码目录运行时，缓存与报告在仓库内
+
+当 `analysis_poly` 是从**带 `pyproject.toml` 的克隆目录**加载（例如 `PYTHONPATH` 指向该目录、或从该目录运行）且**未**设置下面的环境变量时，默认路径为：
+
+| 用途 | 路径 |
+|------|------|
+| 缓存根目录 | `<仓库根>/.cache/poly-web3/` |
+| 报告目录 | `<仓库根>/.data/poly-web3/reports/` |
+
+上述目录已写入 `.gitignore`，不会随 `git add` 提交。
+
+子目录示例（在缓存根下）：
+
+- `market_by_slug/` — 按 slug 缓存的市场元数据  
+- `address_market_results/` — 按地址聚合的分析结果缓存  
+
+若从 **PyPI wheel** 安装到 `site-packages`（非源码树），未设置环境变量时仍使用**操作系统用户目录**（与旧版一致），见下表。
+
+| 系统 | 默认缓存根（wheel / 非源码树） |
+|------|-------------------------------|
+| macOS | `~/Library/Caches/poly-web3` |
+| Linux | `~/.cache/poly-web3` |
+| Windows | `%LOCALAPPDATA%\poly-web3`（或回退 `%APPDATA%\poly-web3`） |
+
+**报告目录**（wheel / 非源码树、且未设置 `ANALYSIS_POLY_REPORTS_DIR`）一般为：macOS 下 `~/Library/Application Support/poly-web3/reports`，Linux `~/.local/share/poly-web3/reports`，Windows `%APPDATA%\poly-web3\reports`。
 
 ### 环境变量（可选，覆盖默认路径）
 
 | 变量 | 作用 |
 |------|------|
-| `ANALYSIS_POLY_CACHE_DIR` | 缓存根目录（其下会再有子目录，见下表） |
+| `ANALYSIS_POLY_CACHE_DIR` | 缓存根目录 |
 | `ANALYSIS_POLY_DATA_DIR` | 应用数据根目录 |
-| `ANALYSIS_POLY_REPORTS_DIR` | 分析报告输出目录（默认在数据目录下的 `reports`） |
-
-未设置时，**缓存根目录**大致为：
-
-| 系统 | 默认缓存根路径 |
-|------|----------------|
-| macOS | `~/Library/Caches/poly-web3` |
-| Linux | `~/.cache/poly-web3` |
-| Windows | `%LOCALAPPDATA%\poly-web3`（若不存在则回退到 `%APPDATA%\poly-web3`） |
-
-在缓存根目录下常见子目录：
-
-- `market_by_slug/` — 按 slug 缓存的市场元数据  
-- `address_market_results/` — 按钱包地址聚合的分析结果缓存（与 `market_result_cache` 等逻辑配合）
-
-**报告目录**在未设置 `ANALYSIS_POLY_REPORTS_DIR` 时，一般为：
-
-- macOS：`~/Library/Application Support/poly-web3/reports`
-- Linux：`~/.local/share/poly-web3/reports`
-- Windows：`%APPDATA%\poly-web3\reports`
+| `ANALYSIS_POLY_REPORTS_DIR` | 分析报告输出目录 |
 
 升级分析逻辑后若图表或数据异常，可删除对应缓存目录或提高结果缓存的 schema 版本后重新跑一次分析（以代码为准）。
 

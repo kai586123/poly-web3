@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Run the analyzer web server without installing the repo as a package.
+# Usage: from repository root, ./scripts/analysis-poly   or   scripts/analysis-poly
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export PYTHONPATH="${ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+exec python -m analysis_poly.cli "$@"

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Same as analysis-poly-open console script, without pip installing this repo.
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export PYTHONPATH="${ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+exec python -m analysis_poly.open_with_params "$@"

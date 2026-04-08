@@ -7,10 +7,27 @@ from pathlib import Path
 APP_NAME = "poly-web3"
 
 
+def _repo_root_for_source_tree() -> Path | None:
+    """If ``analysis_poly`` is loaded from a git checkout (``pyproject.toml`` beside ``analysis_poly/``), return that repo root."""
+    here = Path(__file__).resolve()
+    if here.parent.name != "analysis_poly":
+        return None
+    root = here.parent.parent
+    if not (root / "pyproject.toml").is_file():
+        return None
+    if not (root / "analysis_poly").is_dir():
+        return None
+    return root
+
+
 def default_cache_root() -> Path:
     override = os.getenv("ANALYSIS_POLY_CACHE_DIR")
     if override:
         return Path(override).expanduser().resolve()
+
+    repo = _repo_root_for_source_tree()
+    if repo is not None:
+        return (repo / ".cache" / APP_NAME).resolve()
 
     if sys.platform == "darwin":
         base = Path("~/Library/Caches").expanduser()
@@ -25,6 +42,10 @@ def default_data_root() -> Path:
     override = os.getenv("ANALYSIS_POLY_DATA_DIR")
     if override:
         return Path(override).expanduser().resolve()
+
+    repo = _repo_root_for_source_tree()
+    if repo is not None:
+        return (repo / ".data" / APP_NAME).resolve()
 
     if sys.platform == "darwin":
         base = Path("~/Library/Application Support").expanduser()
