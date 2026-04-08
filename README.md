@@ -8,9 +8,34 @@ Python SDK for redeeming and splitting/merging Polymarket positions via Proxy/Sa
 
 [English](README.md) | [中文](README.zh.md)
 
-Optional address analysis is available for trading fee impact and PnL curves. See [Address Analysis (Optional)](#address-analysis-optional).
+## Monorepo layout
+
+This repository ships **three** Python packages in one editable install:
+
+| Package | Import | Purpose |
+|---------|--------|---------|
+| SDK | `poly_web3` | Redeem, split, merge via Proxy/Safe + relayer |
+| Analyzer | `analysis_poly` | FastAPI dashboard + fee-aware PnL engine |
+| Watcher | `poly_position_watcher` | Position / trade helpers (CLOB + websocket) |
+
+**Local install (recommended for development):**
 
 ```bash
+cd /path/to/poly-web3   # repository root (this folder)
+python3.11 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+```
+
+Console scripts (same as before): `analysis-poly` and `analysis-poly-open`.
+
+**UI assets:** if you change `frontend/src`, run `npm install && npm run build` to refresh `analysis_poly/static/dist/`.
+
+PyPI installs (`pip install poly-web3`) refer to the published SDK only; the analyzer and watcher are **included when you install from this git checkout**.
+
+Profit analyzer (fee impact, PnL curves, extra charts) is **bundled**. See [Profit analyzer](#profit-analyzer-bundled).
+
+```bash
+# published wheel (SDK only), or use `pip install -e .` from this repo for everything
 # required Python >= 3.11
 pip install poly-web3
 ```
@@ -91,12 +116,6 @@ Or using uv:
 
 ```bash
 uv add poly-web3
-```
-
-Install with analysis support:
-
-```bash
-pip install "poly-web3[analysis]"
 ```
 
 ## Requirements
@@ -242,27 +261,35 @@ merge_all_result = service.merge_all(min_usdc=1, batch_size=10)
 print(merge_all_result)
 ```
 
-### Address Analysis (Optional)
+### Profit analyzer (bundled)
 
-You can optionally analyze one address for:
+From a **local clone**, the web analyzer is installed with `pip install -e .`. You can analyze one address for:
 - Trading fee impact (`Net PnL` vs `No-Fee PnL`)
 - PnL curve and ratio/metrics visualization
 
 ![PnL Curve](assets/pnl.png)
 ![Ratio Metrics](assets/ratio.png)
 
-#### Address Analysis CLI
+#### Analyzer CLI
 
-After installing `poly-web3[analysis]`, you can run:
+After `pip install -e .` from this repository (or any install that includes `analysis_poly`), run:
 
 ```bash
 analysis-poly-open --address 0xabc --symbols btc,eth --intervals 5,15
 ```
 
-Or start the base service:
+Or start the web server only:
 
 ```bash
 analysis-poly
+# or: python main.py
+```
+
+#### Position watcher
+
+```python
+from poly_position_watcher.trade_calculator import calculate_position_from_trades
+# See examples/watcher/ for usage patterns.
 ```
 
 ## API Documentation
@@ -387,19 +414,22 @@ result = service.merge_all(
 ## Project Structure
 
 ```
-poly_web3/
-├── __init__.py              # Main entry point, exports PolyWeb3Service
-├── const.py                 # Constant definitions (contract addresses, ABIs, etc.)
-├── schema.py                # Data models (WalletType, etc.)
-├── signature/               # Signature-related modules
-│   ├── build.py            # Proxy wallet derivation and struct hashing
-│   ├── hash_message.py     # Message hashing
-│   └── secp256k1.py        # secp256k1 signing
-└── web3_service/           # Web3 service implementations
-    ├── base.py             # Base service class
-    ├── proxy_service.py    # Proxy wallet service (✅ Implemented)
-    ├── eoa_service.py      # EOA wallet service (🚧 Under development)
-    └── safe_service.py     # Safe wallet service (✅ Implemented)
+├── poly_web3/               # SDK (redeem / split / merge)
+│   ├── __init__.py
+│   ├── web3_service/
+│   └── signature/
+├── analysis_poly/           # Profit web app + engine
+│   ├── web.py
+│   ├── static/dist/       # Built UI (npm; tracked)
+│   └── templates/
+├── poly_position_watcher/   # Position / trade utilities
+├── frontend/                # React + ECharts sources → analysis_poly/static/dist
+├── examples/
+├── tests/
+│   ├── sdk/
+│   ├── analysis/
+│   └── watcher/
+└── pyproject.toml           # Single package distribution: poly-web3
 ```
 
 ## Notes
@@ -414,7 +444,14 @@ poly_web3/
 ### Install Development Dependencies
 
 ```bash
-uv pip install -e ".[dev]"
+pip install -e ".[dev]"
+# or: uv pip install -e ".[dev]"
+```
+
+### Tests
+
+```bash
+python -m pytest tests/
 ```
 
 ### Run Examples

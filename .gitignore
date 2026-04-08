@@ -1,18 +1,44 @@
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
 *.pyd
-*.DS_Store
 .mypy_cache/
 .pytest_cache/
-.dist/
+
+# Packaging
 build/
 dist/
+wheels/
 *.egg-info/
-.env
-.venv
-.idea
-dist
-uv.lock
 poly_web3.egg-info
 
+# Virtual environments & secrets
+.venv/
+venv/
+.env
+
+# Frontend
+node_modules/
+
+# Committed built UI bundles stay tracked
+!analysis_poly/static/dist/
+!analysis_poly/static/dist/app.js
+!analysis_poly/static/dist/app.css
+
+# Runtime / reports
+reports/
+reports/*.json
+reports/*.csv
+.cache/
+analysis_poly/reports/
+analysis_poly/.cache/
+
+# IDE / OS
+.idea/
+.jbeval/
+.DS_Store
+*.log
+
+# Lockfiles (optional: delete this line if you commit uv.lock)
+uv.lock

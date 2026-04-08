@@ -8,10 +8,20 @@ Polymarket Proxy 与 Safe 钱包赎回与拆分/合并仓位的 Python SDK，免
 
 [English](README.md) | 中文
 
-可选支持地址分析（手续费影响与盈亏曲线），见 [地址分析（可选）](#地址分析可选)。
+本仓库为 **单体仓库**：`poly_web3`（SDK）、`analysis_poly`（盈利分析网页）、`poly_position_watcher`（仓位工具）可通过一次本地可编辑安装全部获得。详见 [English README](README.md) 中的 **Monorepo layout**。
 
 ```bash
-Python >= 3.11
+# 从本仓库根目录本地安装（推荐）
+# Python >= 3.11
+pip install -e ".[dev]"
+```
+
+PyPI 上的 `pip install poly-web3` 通常为 **仅 SDK**；分析器与 watcher 请使用本 git 仓库安装。
+
+可选：地址分析（手续费与盈亏曲线），见 [地址分析（随仓库附带）](#地址分析随仓库附带)。
+
+```bash
+# 仅安装已发布的 SDK wheel 时：
 pip install poly-web3
 ```
 
@@ -94,12 +104,6 @@ pip install poly-web3
 
 ```bash
 uv add poly-web3
-```
-
-安装分析能力（extra）：
-
-```bash
-pip install "poly-web3[analysis]"
 ```
 
 ## 环境要求
@@ -246,9 +250,9 @@ print(merge_all_result)
 
 ```
 
-### 地址分析（可选）
+### 地址分析（随仓库附带）
 
-安装 `poly-web3[analysis]` 后，可直接对地址进行：
+使用本仓库并执行 `pip install -e .` 后，可直接对地址进行：
 - 手续费影响分析（`Net PnL` vs `No-Fee PnL`）
 - 盈亏曲线与收益比率指标可视化
 
@@ -257,7 +261,7 @@ print(merge_all_result)
 
 #### 地址分析命令行
 
-安装 `poly-web3[analysis]` 后可直接执行：
+安装完成后可直接执行：
 
 ```bash
 analysis-poly-open --address 0xabc --symbols btc,eth --intervals 5,15

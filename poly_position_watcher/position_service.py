@@ -1,0 +1,734 @@
+# -*- coding = utf-8 -*-
+# @Time: 2025/12/3 15:35
+# @Author: pinbar
+# @Site:
+# @File: position_service.py
+# @Software: PyCharm
+from __future__ import annotations
+
+import threading
+from datetime import datetime
+from queue import Queue, Empty
+from collections import defaultdict
+from typing import Any, Callable, Dict, List, Mapping
+
+from poly_position_watcher.common.enums import Side, TradeStatus
+from poly_position_watcher.common.logger import logger
+from poly_position_watcher.api_worker import APIWorker, HttpFallbackManager
+
+from poly_position_watcher.schema.position_model import (
+    UserPosition,
+    TradeMessage,
+    OrderMessage,
+)
+from poly_position_watcher.trade_calculator import calculate_position_from_trades
+
+from rich.console import Console
+from rich.table import Table
+from poly_position_watcher.wss_worker import PolymarketUserWS
+
+FAILED_TRADE = TradeStatus.FAILED
+
+
+class PositionStore:
+    """
+    Keeps an in-memory view of per-market trades and exposes aggregated positions.
+    """
+
+    def __init__(
+        self,
+        user_address: str,
+        enable_fee_calc: bool = False,
+        market_fee_schedules: Mapping[str, Mapping[str, Any]] | None = None,
+        fee_calc_fn: Callable[
+            [float, float, Side | str, Mapping[str, Any]], tuple[float, float]
+        ]
+        | None = None,
+    ):
+        self.user_address = user_address
+        self.enable_fee_calc = enable_fee_calc
+        self.fee_calc_fn = fee_calc_fn
+        self.market_fee_schedules: Dict[str, dict[str, Any]] = {
+            condition_id: dict(fee_schedule)
+            for condition_id, fee_schedule in (market_fee_schedules or {}).items()
+            if fee_schedule
+        }
+        self.trades_by_token: Dict[str, Dict[str, TradeMessage]] = defaultdict(dict)
+        self.positions: Dict[str, UserPosition] = {}
+        self.orders: Dict[str, OrderMessage] = {}
+        self._lock = threading.RLock()
+        self.queue_dict: Dict[str, Queue] = {}
+
+    def get_token_id_from_trade(self, trade: TradeMessage) -> tuple[str, str] | None:
+        if trade.maker_address.upper() == self.user_address.upper():
+            return trade.outcome, trade.asset_id
+        for order in trade.maker_orders:
+            if order.maker_address.upper() == self.user_address.upper():
+                return order.outcome, order.asset_id
+
+    def _put(self, _id: str, item: UserPosition | OrderMessage) -> None:
+        if _id not in self.queue_dict:
+            self.queue_dict[_id] = Queue()
+        self.queue_dict[_id].put(item)
+
+    def _clear_q(self, _id: str) -> None:
+        if _id in self.queue_dict:
+            self.queue_dict[_id] = Queue()
+
+    def _get(self, _id: str, timeout=None) -> OrderMessage | UserPosition | None:
+        with self._lock:
+            if _id not in self.queue_dict:
+                self.queue_dict[_id] = Queue()
+        return self.queue_dict[_id].get(timeout=timeout)
+
+    def append_trade(self, trade: TradeMessage):
+        """
+        Stores a new trade snapshot.
+        If duplicate trade ids arrive, the payload with the latest update timestamp wins.
+        """
+        with self._lock:
+            result = self.get_token_id_from_trade(trade)
+            if result is None:
+                logger.debug(
+                    "Skip trade without matching maker/taker context: {}", trade.id
+                )
+                return
+            outcome, token_id = result
+            trades_map = self.trades_by_token[token_id]
+            existing = trades_map.get(trade.id)
+            if existing and trade.last_update < existing.last_update:
+                return
+            else:
+                trades_map[trade.id] = trade
+            user_pos = self.build_position(
+                trades=list(trades_map.values()), token_id=token_id, outcome=outcome
+            )
+            self.positions[token_id] = user_pos
+            self._put(token_id, user_pos)
+
+    def init_trades(self, trades: list[TradeMessage]):
+        with self._lock:
+            if not trades:
+                return
+            result = self.get_token_id_from_trade(trades[0])
+            if result is None:
+                logger.debug(
+                    "Skip trade without matching maker/taker context: {}", trades[0].id
+                )
+                return
+            outcome, token_id = result
+            trades_map = self.trades_by_token[token_id]
+            for trade in trades:
+                trades_map[trade.id] = trade
+            user_pos = self.build_position(
+                trades=list(trades_map.values()), token_id=token_id, outcome=outcome
+            )
+            self._clear_q(token_id)
+            self.positions[token_id] = user_pos
+            self._put(token_id, user_pos)
+
+    def append_order(self, order: OrderMessage | None):
+        """
+        Stores a new order snapshot.
+        If duplicate trade ids arrive, the payload with the latest update timestamp wins.
+        """
+        with self._lock:
+            existing = self.orders.get(order.id)
+            if (
+                existing
+                and order.size_matched <= existing.size_matched
+                and order.status == existing.status
+            ):
+                return
+            if abs(order.size_matched - order.original_size) < 0.5:
+                order.filled = True
+            self.orders[order.id] = order
+            self._put(order.id, order)
+
+    def set_market_fee_schedule(
+        self, condition_id: str, fee_schedule: Mapping[str, Any] | None
+    ) -> None:
+        with self._lock:
+            if fee_schedule:
+                self.market_fee_schedules[condition_id] = dict(fee_schedule)
+            else:
+                self.market_fee_schedules.pop(condition_id, None)
+            self._rebuild_positions_for_market(condition_id)
+
+    def set_market_fee_schedules(
+        self, fee_schedule_map: Mapping[str, Mapping[str, Any] | None]
+    ) -> None:
+        with self._lock:
+            affected_markets: set[str] = set()
+            for condition_id, fee_schedule in fee_schedule_map.items():
+                affected_markets.add(condition_id)
+                if fee_schedule:
+                    self.market_fee_schedules[condition_id] = dict(fee_schedule)
+                else:
+                    self.market_fee_schedules.pop(condition_id, None)
+
+            for condition_id in affected_markets:
+                self._rebuild_positions_for_market(condition_id)
+
+    def _rebuild_positions_for_market(self, condition_id: str) -> None:
+        for token_id, trades_map in self.trades_by_token.items():
+            trades = list(trades_map.values())
+            if not trades or not any(trade.market == condition_id for trade in trades):
+                continue
+
+            result = self.get_token_id_from_trade(trades[0])
+            if result is None:
+                continue
+
+            outcome, _ = result
+            user_pos = self.build_position(
+                trades=trades, token_id=token_id, outcome=outcome
+            )
+            if user_pos is None:
+                continue
+            self.positions[token_id] = user_pos
+            self._put(token_id, user_pos)
+
+    def build_position(
+        self, trades: list[TradeMessage], token_id, outcome: str
+    ) -> UserPosition | None:
+        def _status_is(trade: TradeMessage, status: TradeStatus) -> bool:
+            return trade.status == status or trade.status == status.value
+
+        filled_trades = [i for i in trades if _status_is(i, FAILED_TRADE)]
+        success_trades = [i for i in trades if not _status_is(i, FAILED_TRADE)]
+        confirmed_trades = [
+            i for i in success_trades if _status_is(i, TradeStatus.CONFIRMED)
+        ]
+        has_failed = bool(len(filled_trades))
+        if has_failed:
+            filled_size = sum([i.size for i in filled_trades])
+            logger.warning(
+                f"found error trades, total size: {filled_size}: {filled_trades}"
+            )
+        market_slug = next(
+            (trade.market_slug for trade in trades if trade.market_slug), ""
+        )
+        position_result = calculate_position_from_trades(
+            success_trades,
+            user_address=self.user_address,
+            enable_fee_calc=self.enable_fee_calc,
+            fee_schedule_by_market=self.market_fee_schedules,
+            fee_calc_fn=self.fee_calc_fn,
+        )
+        sellable_size = 0.0
+        if confirmed_trades:
+            confirmed_result = calculate_position_from_trades(
+                confirmed_trades,
+                user_address=self.user_address,
+                enable_fee_calc=self.enable_fee_calc,
+                fee_schedule_by_market=self.market_fee_schedules,
+                fee_calc_fn=self.fee_calc_fn,
+            )
+            sellable_size = confirmed_result.size
+        current = UserPosition(
+            price=position_result.avg_price,
+            size=position_result.size,
+            original_size=position_result.original_size,
+            volume=position_result.amount,
+            fee_amount=position_result.fee_amount,
+            sellable_size=sellable_size,
+            token_id=token_id,
+            last_update=position_result.last_update,
+            market_id=trades[0].market,
+            outcome=outcome,
+            created_at=datetime.fromtimestamp(position_result.last_update),
+            has_failed=has_failed,
+            market_slug=market_slug,
+            failed_trades=filled_trades,
+        )
+        return current
+        # if exists_pos := self.positions.get(token_id):
+        #     if exists_pos.last_update < current.last_update:
+        #         return current
+        # else:
+        #     return current
+
+    def get_token_position(self, token_id: str) -> UserPosition:
+        return self.positions.get(token_id)
+
+    def get_token_order(self, token_id: str) -> list[OrderMessage]:
+        orders = []
+        for key, value in self.orders.items():
+            if value.asset_id == token_id:
+                orders.append(value)
+        return orders
+
+    def get_order_by_id(self, order_id: str) -> OrderMessage:
+        return self.orders.get(order_id)
+
+    def blocking_get_token_position(
+        self, token_id: str, timeout: float = None
+    ) -> UserPosition:
+        return self._get(token_id, timeout)
+
+    def blocking_get_order_by_id(
+        self, order_id: str, timeout: float = None
+    ) -> OrderMessage:
+        return self._get(order_id, timeout)
+
+    @staticmethod
+    def _calculate_size(order, size: float, volume: float):
+        if order.side == Side.BUY:
+            size += order.size
+            volume += order.size * order.price
+        elif order.side == Side.SELL:
+            size -= order.size
+            volume -= order.size * order.price
+        return size, volume
+
+
+class PositionWatcherService:
+    """
+    High level service:
+    - Bootstraps positions via HTTP
+    - Maintains updates via WebSocket
+    - Provides context-based HTTP listener for temporary polling threads
+    """
+
+    def __init__(
+        self,
+        client,
+        ws_idle_timeout=60 * 60,
+        wss_proxies: dict | None = None,
+        init_positions: bool = False,
+        enable_http_fallback: bool = False,
+        http_poll_interval: float = 1.5,
+        add_init_positions_to_http: bool = False,
+        enable_fee_calc: bool = False,
+        market_fee_schedules: Mapping[str, Mapping[str, Any]] | None = None,
+        fee_calc_fn: Callable[
+            [float, float, Side | str, Mapping[str, Any]], tuple[float, float]
+        ]
+        | None = None,
+    ):
+        """
+        :param client: ClobClient instance
+        :param ws_idle_timeout: WebSocket idle timeout
+        :param wss_proxies: WebSocket proxy configuration
+        :param init_positions: Whether to initialize positions via official API
+        :param enable_http_fallback: Whether to enable HTTP fallback polling
+        :param http_poll_interval: HTTP polling interval in seconds
+        :param add_init_positions_to_http: Whether to add condition_ids from init_positions to HTTP monitoring
+        :param enable_fee_calc: Whether to apply fee adjustments in position calc
+        :param market_fee_schedules: Optional mapping of condition_id -> feeSchedule
+        :param fee_calc_fn: Optional custom fee function (size, price, side, fee_schedule) -> (new_size, fee_amount)
+
+        wss_proxies example: {
+            "http_proxy_host": "127.0.0.1",
+            "http_proxy_port": 8118,
+            "proxy_type": "http",
+        }
+        """
+        self.client = client
+        self.user_address = self._resolve_user_address()
+        self.position_store = PositionStore(
+            self.user_address,
+            enable_fee_calc=enable_fee_calc,
+            market_fee_schedules=market_fee_schedules,
+            fee_calc_fn=fee_calc_fn,
+        )
+        self._wss_proxies = wss_proxies or {}
+
+        # New parameters
+        self.init_positions = init_positions
+        self.enable_http_fallback = enable_http_fallback
+        self.http_poll_interval = http_poll_interval
+        self.add_init_positions_to_http = add_init_positions_to_http
+
+        # Setup API worker
+        self.api_worker = APIWorker(self.client, self.user_address)
+
+        # Setup WS client
+        creds = self.client.creds or self.client.create_or_derive_api_creds()
+        self.ws_client = PolymarketUserWS(
+            api_key=creds.api_key,
+            api_secret=creds.api_secret,
+            api_passphrase=creds.api_passphrase,
+            idle_timeout=ws_idle_timeout,
+            on_message_callback=self._handle_ws_message,
+            wss_proxies=self._wss_proxies,
+        )
+
+        self._ws_thread = None
+
+        # HTTP fallback manager (if enabled)
+        self._http_fallback: HttpFallbackManager | None = None
+        if self.enable_http_fallback:
+            self._http_fallback = HttpFallbackManager(self, http_poll_interval)
+
+    # -------------------------------------------------------------------------
+    # Context: start/stop entire service
+    # -------------------------------------------------------------------------
+    def __enter__(self):
+        # Initialize positions if requested
+        init_condition_ids = []
+        if self.init_positions:
+            try:
+                initialize_trades = self.api_worker.fetch_trades_from_positions(
+                    self.user_address
+                )
+                if initialize_trades:
+                    for token_id, trades in initialize_trades.items():
+                        self.position_store.init_trades(trades)
+                    positions_info = "\n".join(
+                        [
+                            f"slug={pos.market_slug}, price={pos.price}, size={pos.size:.4f},"
+                            f"volume={pos.volume:.4f}, token_id={pos.token_id}, outcome={pos.outcome}"
+                            for pos in self.position_store.positions.values()
+                        ]
+                    )
+                    logger.info(f"Initialized positions:\n{positions_info}")
+            except Exception as e:
+                logger.error(f"Failed to initialize positions: {e}")
+
+        # Start WebSocket
+        self.start()
+
+        # Start HTTP fallback if enabled (threads start even if sets are empty)
+        if self.enable_http_fallback and self._http_fallback:
+            self._http_fallback.start()
+
+            # Add init positions' condition_ids to HTTP monitoring if requested
+            if self.add_init_positions_to_http and init_condition_ids:
+                self._http_fallback.add(market_ids=init_condition_ids)
+                logger.info(
+                    f"Added {len(init_condition_ids)} condition_ids from init_positions to HTTP monitoring"
+                )
+
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        # Stop HTTP fallback threads
+        if self._http_fallback:
+            self._http_fallback.stop()
+        self.stop()
+        return False
+
+    # -------------------------------------------------------------------------
+    # Start / Stop
+    # -------------------------------------------------------------------------
+    def start(self):
+        # Start WebSocket
+        if not self._ws_thread or not self._ws_thread.is_alive():
+            self._ws_thread = threading.Thread(target=self.ws_client.start, daemon=True)
+            self._ws_thread.start()
+            logger.info("Started WebSocket worker.")
+
+    def stop(self):
+        self.ws_client.stop()
+        # Join WS
+        if self._ws_thread:
+            self._ws_thread.join(timeout=1)
+
+        logger.info("Position watcher stopped.")
+
+    # -------------------------------------------------------------------------
+    # WS handler
+    # -------------------------------------------------------------------------
+    def _handle_ws_message(self, payload):
+        logger.info(f"WS message: {payload.get('type')}")
+        if payload.get("type") == "TRADE":
+            self._ingest_trade(TradeMessage(**payload))
+        else:
+            self._ingest_order(OrderMessage(**payload))
+
+    # -------------------------------------------------------------------------
+    # Ingestion
+    # -------------------------------------------------------------------------
+    def _ingest_trade(self, trade):
+        self.position_store.append_trade(trade)
+
+    def _init_trades(self, trades: list[TradeMessage]):
+        self.position_store.init_trades(trades)
+
+    def _ingest_order(self, order):
+        self.position_store.append_order(order)
+
+    # -------------------------------------------------------------------------
+    # Helpers
+    # -------------------------------------------------------------------------
+    def _resolve_user_address(self):
+        funder = getattr(getattr(self.client, "builder", None), "funder", None)
+        if funder:
+            return funder
+        return self.client.get_address()
+
+    def get_position(self, token_id: str) -> UserPosition:
+        if position := self.position_store.get_token_position(token_id):
+            return position
+        return UserPosition(token_id=token_id, price=0, size=0, volume=0, last_update=0)
+
+    def set_market_fee_schedule(
+        self, condition_id: str, fee_schedule: Mapping[str, Any] | None
+    ) -> None:
+        self.position_store.set_market_fee_schedule(condition_id, fee_schedule)
+
+    def set_market_fee_schedules(
+        self, fee_schedule_map: Mapping[str, Mapping[str, Any] | None]
+    ) -> None:
+        self.position_store.set_market_fee_schedules(fee_schedule_map)
+
+    @staticmethod
+    def _truncate(value: str, limit: int) -> str:
+        if len(value) <= limit:
+            return value
+        keep = max(limit - 3, 0)
+        head = keep // 2
+        tail = keep - head
+        return f"{value[:head]}...{value[-tail:]}" if keep else "..."
+
+    def show_positions(self, limit: int | None = None, max_width: int = 24) -> str:
+        """
+        Pretty print current positions and return the rendered table.
+        """
+        store = self.position_store
+        with store._lock:
+            positions = list(store.positions.values())
+        if not positions:
+            output = "No positions."
+            print(output)
+            return output
+
+        rows = []
+        for pos in positions:
+            last_update = (
+                datetime.fromtimestamp(pos.last_update).strftime("%Y-%m-%d %H:%M:%S")
+                if pos.last_update
+                else ""
+            )
+            rows.append(
+                {
+                    "slug": pos.market_slug or "",
+                    "outcome": pos.outcome or "",
+                    "token_id": pos.token_id or "",
+                    "price": f"{pos.price:.3f}",
+                    "size": f"{pos.size:.3f}",
+                    "volume": f"{pos.volume:.4f}",
+                    "updated_at": last_update,
+                }
+            )
+
+        rows.sort(key=lambda r: abs(float(r["volume"])), reverse=True)
+        if limit:
+            rows = rows[:limit]
+        headers = [
+            "slug",
+            "outcome",
+            "token_id",
+            "price",
+            "size",
+            "volume",
+            "updated_at",
+        ]
+        table = Table(title="Positions", show_lines=False, show_footer=True)
+        table.add_column("slug", style="cyan")
+        table.add_column("outcome", style="magenta")
+        table.add_column("price", justify="right")
+        table.add_column("size", justify="right")
+        table.add_column("volume", justify="right")
+        table.add_column("updated_at", style="dim")
+        table.add_column("token_id", style="yellow", no_wrap=True)
+
+        total_size = 0.0
+        total_volume = 0.0
+        for row in rows:
+            try:
+                total_size += float(row["size"])
+                total_volume += float(row["volume"])
+            except ValueError:
+                pass
+            table.add_row(
+                row["slug"],
+                row["outcome"],
+                row["price"],
+                row["size"],
+                row["volume"],
+                row["updated_at"],
+                self._truncate(row["token_id"], max_width),
+            )
+        if rows:
+            table.columns[0].footer = "TOTAL"
+            table.columns[3].footer = f"{total_size:.4f}"
+            table.columns[4].footer = f"{total_volume:.4f}"
+        console = Console()
+        console.print(table)
+        record_console = Console(record=True)
+        record_console.print(table)
+        return record_console.export_text()
+
+    def show_orders(self, limit: int | None = None, max_width: int = 24) -> str:
+        """
+        Pretty print current orders and return the rendered table.
+        """
+        store = self.position_store
+        with store._lock:
+            orders = list(store.orders.values())
+        if not orders:
+            output = "No orders."
+            print(output)
+            return output
+
+        rows = []
+        for order in orders:
+            created_at = (
+                datetime.fromtimestamp(order.timestamp / 1000).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+                if order.timestamp
+                else ""
+            )
+            rows.append(
+                {
+                    "slug": order.market_slug or "",
+                    "outcome": order.outcome or "",
+                    "order_id": order.id or "",
+                    "side": order.side or "",
+                    "price": f"{order.price:.3f}",
+                    "size_matched": f"{order.size_matched:.4f}",
+                    "original_size": f"{order.original_size or 0.0:.4f}",
+                    "status": order.status or "",
+                    "created_at": created_at,
+                }
+            )
+        rows.sort(key=lambda r: abs(float(r["size_matched"])), reverse=True)
+        if limit:
+            rows = rows[:limit]
+        table = Table(title="Orders", show_lines=False, show_footer=True)
+        table.add_column("slug", style="cyan")
+        table.add_column("outcome", style="magenta")
+        table.add_column("side", style="green")
+        table.add_column("price", justify="right")
+        table.add_column("size_matched", justify="right")
+        table.add_column("original_size", justify="right")
+        table.add_column("status", style="blue")
+        table.add_column("created_at", style="dim")
+        table.add_column("order_id", style="yellow", no_wrap=True)
+
+        total_size_matched = 0.0
+        total_original_size = 0.0
+        for row in rows:
+            try:
+                total_size_matched += float(row["size_matched"])
+                total_original_size += float(row["original_size"])
+            except ValueError:
+                pass
+            table.add_row(
+                row["slug"],
+                row["outcome"],
+                row["side"],
+                row["price"],
+                row["size_matched"],
+                row["original_size"],
+                row["status"],
+                row["created_at"],
+                self._truncate(row["order_id"], max_width),
+            )
+        if rows:
+            table.columns[0].footer = "TOTAL"
+            table.columns[4].footer = f"{total_size_matched:.3f}"
+            table.columns[5].footer = f"{total_original_size:.4f}"
+
+        console = Console()
+        console.print(table)
+        record_console = Console(record=True)
+        record_console.print(table)
+        return record_console.export_text()
+
+    def get_order_by_token(self, token_id: str) -> list[OrderMessage]:
+        return self.position_store.get_token_order(token_id)
+
+    def get_order(self, order_id: str) -> OrderMessage:
+        return self.position_store.get_order_by_id(order_id)
+
+    def blocking_get_position(
+        self, token_id: str, timeout: float = None
+    ) -> UserPosition | None:
+        """
+        超时返回None；若无仓位则返回 size=0 的占位 UserPosition
+        """
+        try:
+            return self.position_store.blocking_get_token_position(token_id, timeout)
+        except Empty:
+            # 若超时未收到任何仓位更新，则返回上一次position 方便上层统一处理
+            return self.get_position(token_id)
+
+    def blocking_get_order(
+        self, order_id: str, timeout: float = None
+    ) -> OrderMessage | None:
+        """
+        超时返回None（即返回 None，表示没有订单更新）
+        """
+        try:
+            return self.position_store.blocking_get_order_by_id(order_id, timeout)
+        except Empty:
+            # 超时未拿到订单更新时直接返回 None，由调用方自行判断
+            return None
+
+    # -------------------------------------------------------------------------
+    # HTTP Fallback Management (delegates to HttpFallbackManager)
+    # -------------------------------------------------------------------------
+    def add_http_listen(
+        self, order_ids: list[str] = None, market_ids: list[str] = None
+    ):
+        """
+        Add markets/orders to HTTP fallback polling.
+
+        :param order_ids: List of order IDs to monitor
+        :param market_ids: List of market (condition) IDs to monitor
+        """
+        if not self.enable_http_fallback or not self._http_fallback:
+            logger.warning(
+                "HTTP fallback is not enabled. Enable it in __init__ to use this method."
+            )
+            return
+
+        self._http_fallback.add(market_ids=market_ids, order_ids=order_ids)
+
+    def remove_http_listen(
+        self, order_ids: list[str] = None, market_ids: list[str] = None
+    ):
+        """
+        Remove markets/orders from HTTP fallback polling.
+
+        :param order_ids: List of order IDs to remove
+        :param market_ids: List of market (condition) IDs to remove
+        """
+        if not self.enable_http_fallback or not self._http_fallback:
+            return
+
+        self._http_fallback.remove(market_ids=market_ids, order_ids=order_ids)
+
+    def set_market_http_listen(self, market_ids: list[str] = None):
+        """
+        Replace HTTP fallback market monitoring list.
+
+        :param market_ids: List of market (condition) IDs to monitor
+        """
+        if not self.enable_http_fallback or not self._http_fallback:
+            return
+
+        self._http_fallback.set_markets(market_ids=market_ids)
+
+    def set_order_http_listen(self, order_ids: list[str] = None):
+        """
+        Replace HTTP fallback order monitoring list.
+
+        :param order_ids: List of order IDs to monitor
+        """
+        if not self.enable_http_fallback or not self._http_fallback:
+            return
+
+        self._http_fallback.set_orders(order_ids=order_ids)
+
+    def clear_http(self):
+        """Clear all HTTP fallback monitoring (threads keep running)."""
+        if not self.enable_http_fallback or not self._http_fallback:
+            return
+
+        self._http_fallback.clear()

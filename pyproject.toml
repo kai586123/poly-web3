@@ -1,21 +1,25 @@
+[build-system]
+requires = ["setuptools>=80.9.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "poly-web3"
-version = "1.0.8"
-description = "Polymarket Proxy wallet redeem SDK - Execute redeem operations on Polymarket using proxy wallets"
+version = "1.1.0"
+description = "Polymarket monorepo: redeem/split/merge SDK, profit web analyzer, and position watcher"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = [
-    "py-clob-client>=0.25.0",
-    "py-builder-relayer-client>=0.0.1",
-    "web3>=7.0.0,<8",
-    "eth-utils==5.3.1",
-    "pydantic>=2.10.5",
-    "setuptools>=80.9.0"
+license = { text = "MIT" }
+authors = [{ name = "PinBar" }]
+keywords = [
+    "polymarket",
+    "web3",
+    "proxy",
+    "wallet",
+    "redeem",
+    "blockchain",
+    "polygon",
+    "analysis",
 ]
-authors = [
-    {name = "PinBar"}
-]
-keywords = ["polymarket", "web3", "proxy", "wallet", "redeem", "blockchain", "polygon"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -25,19 +29,58 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: Internet :: WWW/HTTP",
 ]
+dependencies = [
+    "eth-utils==5.3.1",
+    "fastapi>=0.115.0",
+    "httpx>=0.28.1",
+    "jinja2>=3.1.6",
+    "loguru>=0.7.3",
+    "py-builder-relayer-client>=0.0.1",
+    "py-clob-client>=0.25.0",
+    "pydantic>=2.11.0",
+    "rich>=14.2.0",
+    "setuptools>=80.9.0",
+    "uvicorn>=0.35.0",
+    "web3>=7.0.0,<8",
+    "websocket-client>=1.8.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/tosmart01/poly-web3"
+Repository = "https://github.com/tosmart01/poly-web3"
+"Bug Tracker" = "https://github.com/tosmart01/poly-web3/issues"
+
+[project.scripts]
+analysis-poly = "analysis_poly.cli:main"
+analysis-poly-open = "analysis_poly.open_with_params:main"
 
 [project.optional-dependencies]
-analysis = [
-    "analysis-poly>=0.1.1",
+dev = [
+    "build>=1.4.0",
+    "pytest>=8.3.4",
+    "pytest-asyncio>=0.24.0",
+    "twine>=6.2.0",
 ]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["poly_web3*", "analysis_poly*", "poly_position_watcher*"]
+
+[tool.setuptools.package-data]
+analysis_poly = [
+    "templates/*.html",
+    "static/dist/*.js",
+    "static/dist/*.css",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+addopts = "-q"
 
 [format]
 line-length = 120
-
-[project.urls]
-"Homepage" = "https://github.com/tosmart01/poly-web3"
-"Repository" = "https://github.com/tosmart01/poly-web3"
-"Bug Tracker" = "https://github.com/tosmart01/poly-web3/issues"
 
 [tool.ruff.format]
 quote-style = "double"
@@ -46,14 +89,6 @@ line-ending = "lf"
 
 [dependency-groups]
 dev = [
-    "build>=1.3.0",
-    "loguru>=0.7.3",
+    "build>=1.4.0",
     "twine>=6.2.0",
-]
-
-[tool.setuptools.packages.find]
-exclude = [
-    "__pycache__",
-    "*.pyc",
-    "*.pyo",
 ]

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.0
+
+- Monorepo: bundle `analysis_poly` (profit web analyzer) and `poly_position_watcher` (position utilities) with the `poly_web3` SDK in a single `pip install -e .` from this repository.
+- Merged tooling: one `pyproject.toml`, shared `tests/` layout (`sdk`, `analysis`, `watcher`), root `frontend/` + `npm run build` for dashboard assets, console scripts `analysis-poly` / `analysis-poly-open`.
+- Removed PyPI-only `poly-web3[analysis]` extra; use a git checkout for the full stack.
+
 ## 1.0.7
 
 - Refactor HTTP requests into a dedicated API client with URL constants and shared `requests.Session` usage.
