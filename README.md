@@ -4,156 +4,169 @@
 ![Python](https://img.shields.io/pypi/pyversions/poly-web3)
 ![License](https://img.shields.io/github/license/tosmart01/poly-web3)
 
-Python SDK for redeeming and splitting/merging Polymarket positions via Proxy/Safe wallets (gas-free).
+面向 Polymarket 的 Python 单体仓库：通过 Relayer 在 **Proxy / Safe** 钱包上执行 **赎回（redeem）**、**拆分（split）**、**合并（merge）**；并附带 **手续费感知盈亏分析 Web 界面**（`analysis_poly`）与 **仓位工具**（`poly_position_watcher`）。
 
-[English](README.md) | [中文](README.zh.md)
+**语言：** [中文](README.md) | [English](README.en.md)
 
-## Monorepo layout
+---
 
-This repository ships **three** Python packages in one editable install:
+## 一、卸载通过 pip 从网络安装的旧版本
 
-| Package | Import | Purpose |
-|---------|--------|---------|
-| SDK | `poly_web3` | Redeem, split, merge via Proxy/Safe + relayer |
-| Analyzer | `analysis_poly` | FastAPI dashboard + fee-aware PnL engine |
-| Watcher | `poly_position_watcher` | Position / trade helpers (CLOB + websocket) |
+若你曾用 `pip install poly-web3` 或单独安装过 `analysis_poly`（或其它名称但指向同一套代码的包），建议先卸载再使用本仓库的本地安装，避免 `site-packages` 里混用旧 wheel 与新源码。
 
-**Local install (recommended for development):**
+在**同一 Python 环境**中执行（可按需加上 `-y` 跳过确认）：
 
 ```bash
-cd /path/to/poly-web3   # repository root (this folder)
-python3.11 -m venv .venv && source .venv/bin/activate
+pip uninstall poly-web3 analysis_poly -y
+```
+
+确认已无残留：
+
+```bash
+pip show poly-web3 analysis_poly
+# 若提示 WARNING: Package(s) not found 则表示已卸载干净
+```
+
+**说明：**
+
+- 若你只安装过 `poly-web3`，第二条命令对 `analysis_poly` 报错是正常的。
+- 若你使用 **可编辑安装** `pip install -e .` 过旧路径的仓库，同样用上面的 `uninstall` 卸载后再从**当前**克隆目录重新 `pip install -e .`。
+- 可选：清理 pip 下载缓存（不影响已安装包，仅释放磁盘）  
+  `pip cache purge`
+
+---
+
+## 二、克隆本仓库后的本地安装（推荐）
+
+**要求：** Python **>= 3.11**
+
+```bash
+git clone https://github.com/kai586123/poly-web3.git
+cd poly-web3
+
+python3.11 -m venv .venv
+# Windows: .venv\Scripts\activate
+source .venv/bin/activate
+
+pip install -U pip
 pip install -e ".[dev]"
 ```
 
-Console scripts (same as before): `analysis-poly` and `analysis-poly-open`.
+安装完成后，控制台会提供（与 `pyproject.toml` 中 `[project.scripts]` 一致）：
 
-**UI assets:** if you change `frontend/src`, run `npm install && npm run build` to refresh `analysis_poly/static/dist/`.
+| 命令 | 说明 |
+|------|------|
+| `analysis-poly` | 仅启动 Web 服务（默认绑定 `0.0.0.0:8000`） |
+| `analysis-poly-open` | 启动服务并在浏览器打开，可附带分析参数 |
 
-PyPI installs (`pip install poly-web3`) refer to the published SDK only; the analyzer and watcher are **included when you install from this git checkout**.
+**修改前端资源：** 若你改动了 `frontend/src/`，请在仓库根目录执行 `npm install && npm run build`，以刷新 `analysis_poly/static/dist/` 下的打包文件。
 
-Profit analyzer (fee impact, PnL curves, extra charts) is **bundled**. See [Profit analyzer](#profit-analyzer-bundled).
+**与 PyPI 包的区别：** `pip install poly-web3` 通常对应已发布的 **SDK wheel**；要从本仓库获得 **完整** `poly_web3` + `analysis_poly` + `poly_position_watcher`，请使用上面的 **`pip install -e .`**。
+
+---
+
+## 三、分析与缓存、报告目录说明
+
+分析器会将 **市场元数据缓存**、**按地址聚合的市场结果缓存** 等写入本机目录；**导出报告**默认在用户数据目录下。逻辑见 `analysis_poly/storage_paths.py`。
+
+### 环境变量（可选，覆盖默认路径）
+
+| 变量 | 作用 |
+|------|------|
+| `ANALYSIS_POLY_CACHE_DIR` | 缓存根目录（其下会再有子目录，见下表） |
+| `ANALYSIS_POLY_DATA_DIR` | 应用数据根目录 |
+| `ANALYSIS_POLY_REPORTS_DIR` | 分析报告输出目录（默认在数据目录下的 `reports`） |
+
+未设置时，**缓存根目录**大致为：
+
+| 系统 | 默认缓存根路径 |
+|------|----------------|
+| macOS | `~/Library/Caches/poly-web3` |
+| Linux | `~/.cache/poly-web3` |
+| Windows | `%LOCALAPPDATA%\poly-web3`（若不存在则回退到 `%APPDATA%\poly-web3`） |
+
+在缓存根目录下常见子目录：
+
+- `market_by_slug/` — 按 slug 缓存的市场元数据  
+- `address_market_results/` — 按钱包地址聚合的分析结果缓存（与 `market_result_cache` 等逻辑配合）
+
+**报告目录**在未设置 `ANALYSIS_POLY_REPORTS_DIR` 时，一般为：
+
+- macOS：`~/Library/Application Support/poly-web3/reports`
+- Linux：`~/.local/share/poly-web3/reports`
+- Windows：`%APPDATA%\poly-web3\reports`
+
+升级分析逻辑后若图表或数据异常，可删除对应缓存目录或提高结果缓存的 schema 版本后重新跑一次分析（以代码为准）。
+
+---
+
+## 四、网页分析器：如何启动
+
+### 典型用法（打开浏览器并预填参数）
+
+在已 `pip install -e .` 且虚拟环境已激活的前提下，于**仓库根目录**执行：
 
 ```bash
-# published wheel (SDK only), or use `pip install -e .` from this repo for everything
-# required Python >= 3.11
-pip install poly-web3
+analysis-poly-open --address 0x你的钱包地址 --symbols btc --intervals 5,15
+```
+
+说明：
+
+- `--address`：要分析的钱包地址（`0x` 开头）。
+- `--symbols`：逗号分隔，如 `btc,eth`（与产品约定一致）。
+- `--intervals`：逗号分隔的分钟周期，如 `5,15`。
+- 默认在 `0.0.0.0:8000` 启动服务，并在浏览器打开；本机访问即 `http://localhost:8000/`。
+- 常用可选参数：`--host`、`--port`、`--start-time`、`--end-time`（格式 `YYYY-MM-DD HH:MM`）、`--auto-start` 等；详见 `analysis_poly/open_with_params.py`。
+
+### 仅启动服务（不自动开浏览器）
+
+```bash
+analysis-poly
+# 等价于使用 uvicorn 启动 FastAPI 应用，默认端口仍为 8000（以 CLI 为准）
+```
+
+手动在浏览器访问 `http://localhost:8000/` 即可。
+
+---
+
+## 五、Split / Merge / Redeem 完整示例
+
+以下示例与仓库内 `examples/example_split_merge.py`、`examples/example_redeem.py` 一致思路：**请先配置环境变量**（勿将密钥提交到 git）。
+
+所需环境变量示例（名称以你本地 `.env` 为准）：
+
+- `POLY_API_KEY`、`POLYMARKET_PROXY_ADDRESS`（或 Safe 地址）
+- `BUILDER_KEY`、`BUILDER_SECRET`、`BUILDER_PASSPHRASE`（Builder 凭证，链上写操作依赖 Relayer，需按 [Polymarket Builders 文档](https://docs.polymarket.com/developers/builders/builder-intro) 申请）
+
+```bash
+pip install python-dotenv
 ```
 
 ```python
-from poly_web3 import PolyWeb3Service
-
-service = PolyWeb3Service(
-    clob_client=client,
-    relayer_client=relayer_client,
-)
-
-# Redeem all redeemable positions for the current account.
-service.redeem_all(batch_size=10)
-service.redeem(condition_ids=["0x..."])
-
-# Split/Merge for binary markets (amount in human USDC units).
-service.split("0x...", 10)
-service.merge("0x...", 10)
-service.merge_all(min_usdc=1, batch_size=10)
-
-# batch Split/Merge
-service.split_batch([{"condition_id": "", "amount": 10}])
-service.merge_batch([{"condition_id": "", "amount": 10}])
-
-```
-
-[See the full example](#quick-start)
-
-## Redeem Behavior Notes
-
-- Redeemable positions are fetched via the official Positions API, which typically has ~1 minute latency.
-- `redeem` and `redeem_all` return a `RedeemResult` pydantic object with `success_list` and `error_list`.
-- `success_list` keeps the raw relayer `execute` result structure; `error_list` exposes `condition_id`, `market_slug`, and `error` for retry/backfill.
-- `error_condition_ids` is a shortcut list derived from `error_list`, so you can directly retry with `service.redeem(result.error_condition_ids)`.
-
-## Split/Merge Notes
-
-- `split`/`merge` are designed for binary markets (Yes/No) and use the default partition internally.
-- Negative-risk markets are detected via the official Gamma markets API and are routed to the NegRisk Adapter.
-- `amount` is in human units (USDC), and is converted to base units internally.
-
-## FAQ
-
-1. **UI shows redeemable, but `redeem_all` returns `[]`**: The official Positions API can be delayed by 1–3 minutes. Wait a bit and retry.
-2. **RPC error during redeem**: Switch RPC endpoints by setting `rpc_url` when instantiating `PolyWeb3Service`.
-3. **Redeem stuck in `execute`**: The official relayer may be congested. Stop redeeming for 1 hour to avoid nonce looping from repeated submissions.
-4. **Relayer client returns 403**: You need to apply for Builder API access and use a valid key. Reference: Polymarket Builders — Introduction: https://docs.polymarket.com/developers/builders/builder-intro
-5. **Relayer daily limit**: The official relayer typically limits to 100 requests per day. Prefer batch redeem (`batch_size`) to reduce the number of requests and avoid hitting the limit.
-
-## About the Project
-
-This project is a Python rewrite of Polymarket's official TypeScript implementation of `builder-relayer-client`, designed to provide Python developers with a convenient tool for executing Proxy and Safe wallet redeem operations on Polymarket.
-
-**Important Notes:**
-- This project implements official CTF redeem plus binary split/merge operations
-- Other features (such as trading, order placement, etc.) are not within the scope of this project
-
-**Some Polymarket-related redeem or write operations implemented in this project depend on access granted through Polymarket's Builder program. To perform real redeem operations against Polymarket, you must apply for and obtain a Builder key/credentials via Polymarket's official Builder application process. After approval you will receive the credentials required to use the Builder API—only then will the redeem flows in this repository work against the live service. For local development or automated tests, use mocks or testnet setups instead of real keys to avoid exposing production credentials.**
-
-Reference：
-- Polymarket Builders — Introduction: https://docs.polymarket.com/developers/builders/builder-intro
-
-**Current Status:**
-- ✅ **Proxy Wallet** - Fully supported for redeem/split/merge
-- ✅ **Safe Wallet** - Fully supported for redeem/split/merge
-- 🚧 **EOA Wallet** - Under development
-
-We welcome community contributions! If you'd like to help implement EOA wallet redeem functionality, or have other improvement suggestions, please feel free to submit a Pull Request.
-
-## Installation
-
-```bash
-pip install poly-web3
-```
-
-Or using uv:
-
-```bash
-uv add poly-web3
-```
-
-## Requirements
-
-- Python >= 3.11
-
-## Dependencies
-
-- `py-clob-client >= 0.25.0` - Polymarket CLOB client
-- `py-builder-relayer-client >= 0.0.1` - Builder Relayer client
-- `web3 >= 7.0.0` - Web3.py library
-- `eth-utils == 5.3.1` - Ethereum utilities library
-
-## Quick Start
-
-### Basic Usage - Redeem
-
-```python
+# -*- coding: utf-8 -*-
+"""Split、Merge、Redeem 完整示例（二元市场；amount 为 USDC 人类单位）。"""
 import os
+
 import dotenv
 from py_builder_relayer_client.client import RelayClient
 from py_builder_signing_sdk.config import BuilderConfig
 from py_builder_signing_sdk.sdk_types import BuilderApiKeyCreds
 from py_clob_client.client import ClobClient
+
 from poly_web3 import RELAYER_URL, PolyWeb3Service
 
 dotenv.load_dotenv()
 
 host = "https://clob.polymarket.com"
-chain_id = 137
+chain_id = 137  # Polygon 主网
+
 client = ClobClient(
     host,
     key=os.getenv("POLY_API_KEY"),
     chain_id=chain_id,
-    signature_type=1,
+    signature_type=1,  # Proxy；Safe 钱包使用 signature_type=2
     funder=os.getenv("POLYMARKET_PROXY_ADDRESS"),
 )
-
 client.set_api_creds(client.create_or_derive_api_creds())
 
 relayer_client = RelayClient(
@@ -175,311 +188,90 @@ service = PolyWeb3Service(
     rpc_url="https://polygon-bor.publicnode.com",
 )
 
+condition_id = "0xaba28be5f981580aa29a123afc8d233dd66c1f236f0d7e1bfffe07777cdb6cc5"
+amount = 10  # USDC 人类单位
+
+# ---------- Split：USDC 拆成 Yes/No 仓位 ----------
+split_result = service.split(condition_id, amount)
+print("split:", split_result)
+
+# ---------- Merge：将 Yes/No 合并回 USDC ----------
+merge_result = service.merge(condition_id, amount)
+print("merge:", merge_result)
+
+# ---------- 批量 Split / Merge ----------
+split_batch_result = service.split_batch([{"condition_id": condition_id, "amount": 10}])
+print("split_batch:", split_batch_result.model_dump_json(indent=2))
+
+merge_batch_result = service.merge_batch([{"condition_id": condition_id, "amount": 10}])
+print("merge_batch:", merge_batch_result.model_dump_json(indent=2))
+
+# ---------- 扫描可 merge 的仓位（仅规划，不自动全部执行）----------
+merge_plan = service.plan_merge_all(min_usdc=5, exclude_neg_risk=True)
+for item in merge_plan:
+    print(item.model_dump_json(indent=2))
+
+merge_all_result = service.merge_all(min_usdc=1, batch_size=10)
+print("merge_all:", merge_all_result)
+
+# ---------- Redeem：赎回已结算仓位 ----------
 redeem_all_result = service.redeem_all(batch_size=10)
-print(redeem_all_result)
+print("redeem_all:", redeem_all_result)
 if redeem_all_result.error_list:
-    print("Redeem all failed items:", redeem_all_result.error_list)
-    print("Retry condition ids:", redeem_all_result.error_condition_ids)
+    print("失败项:", redeem_all_result.error_list)
+    print("可重试 condition_ids:", redeem_all_result.error_condition_ids)
 
 condition_ids = [
     "0xaba28be5f981580aa29a123afc8d233dd66c1f236f0d7e1bfffe07777cdb6cc5",
 ]
 redeem_batch_result = service.redeem(condition_ids, batch_size=10)
-print(redeem_batch_result)
+print("redeem:", redeem_batch_result)
 if redeem_batch_result.error_list:
-    print("Redeem batch failed items:", redeem_batch_result.error_list)
-    print("Retry condition ids:", redeem_batch_result.error_condition_ids)
+    print("失败项:", redeem_batch_result.error_list)
+    print("可重试 condition_ids:", redeem_batch_result.error_condition_ids)
 ```
 
-### Basic Usage - Split/Merge
+**行为说明摘要：**
 
-```python
-import os
-import dotenv
-from py_builder_relayer_client.client import RelayClient
-from py_builder_signing_sdk.config import BuilderConfig
-from py_builder_signing_sdk.sdk_types import BuilderApiKeyCreds
-from py_clob_client.client import ClobClient
-from poly_web3 import RELAYER_URL, PolyWeb3Service
+- 可赎回列表来自官方 Positions API，可能有约 **1～3 分钟**延迟。
+- `redeem` / `redeem_all` 返回 `RedeemResult`（含 `success_list`、`error_list`、`error_condition_ids`），失败项可据此重试。
+- 负风险市场会通过 Gamma API 识别并走 NegRisk Adapter；`split`/`merge` 的 `amount` 均为 **USDC 人类单位**。
 
-dotenv.load_dotenv()
+更细的 API 说明与英文文档见 [README.en.md](README.en.md)。
 
-# Initialize ClobClient
-host = "https://clob.polymarket.com"
-chain_id = 137  # Polygon mainnet
-client = ClobClient(
-    host,
-    key=os.getenv("POLY_API_KEY"),
-    chain_id=chain_id,
-    signature_type=1,  # Proxy wallet type (signature_type=2 for Safe)
-    funder=os.getenv("POLYMARKET_PROXY_ADDRESS"),
-)
+---
 
-client.set_api_creds(client.create_or_derive_api_creds())
-
-# Initialize RelayerClient
-relayer_client = RelayClient(
-    RELAYER_URL,
-    chain_id,
-    os.getenv("POLY_API_KEY"),
-    BuilderConfig(
-        local_builder_creds=BuilderApiKeyCreds(
-            key=os.getenv("BUILDER_KEY"),
-            secret=os.getenv("BUILDER_SECRET"),
-            passphrase=os.getenv("BUILDER_PASSPHRASE"),
-        )
-    ),
-)
-
-# Create service instance
-service = PolyWeb3Service(
-    clob_client=client,
-    relayer_client=relayer_client,
-    rpc_url="https://polygon-bor.publicnode.com",  # optional
-)
-
-condition_id = "0xaba28be5f981580aa29a123afc8d233dd66c1f236f0d7e1bfffe07777cdb6cc5"
-amount = 10  # amount in human USDC units
-
-split_result = service.split(condition_id, amount)
-print(split_result)
-
-merge_result = service.merge(condition_id, amount)
-print(merge_result)
-
-split_batch_result = service.split_batch([{"condition_id": condition_id, "amount": 10}])
-print(split_batch_result.model_dump_json(indent=2))
-
-merge_batch_result = service.merge_batch([{"condition_id": condition_id, "amount": 10}])
-print(merge_batch_result.model_dump_json(indent=2))
-
-merge_plan = service.plan_merge_all(min_usdc=5, exclude_neg_risk=True)
-for i in merge_plan:
-    print(i.model_dump_json(indent=2))
-
-merge_all_result = service.merge_all(min_usdc=1, batch_size=10)
-print(merge_all_result)
-```
-
-### Profit analyzer (bundled)
-
-From a **local clone**, the web analyzer is installed with `pip install -e .`. You can analyze one address for:
-- Trading fee impact (`Net PnL` vs `No-Fee PnL`)
-- PnL curve and ratio/metrics visualization
-
-![PnL Curve](assets/pnl.png)
-![Ratio Metrics](assets/ratio.png)
-
-#### Analyzer CLI
-
-After `pip install -e .` from this repository (or any install that includes `analysis_poly`), run:
-
-```bash
-analysis-poly-open --address 0xabc --symbols btc,eth --intervals 5,15
-```
-
-Or start the web server only:
-
-```bash
-analysis-poly
-# or: python main.py
-```
-
-#### Position watcher
-
-```python
-from poly_position_watcher.trade_calculator import calculate_position_from_trades
-# See examples/watcher/ for usage patterns.
-```
-
-## API Documentation
-
-### PolyWeb3Service
-
-The main service class that automatically selects the appropriate service implementation based on wallet type.
-
-#### Methods
-
-##### `redeem(condition_ids: list[str], batch_size: int = 20) -> RedeemResult`
-
-Execute redeem operation.
-
-**Parameters:**
-- `condition_ids` (list[str]): List of condition IDs
-- `batch_size` (int): Batch size for redeem requests
-
-**Returns:**
-- `RedeemResult`: A pydantic object with:
-- `success_list`: Raw relayer `execute` result payloads for successful batches
-- `error_list`: Failed condition entries with `condition_id`, `market_slug`, and `error`
-- `error_condition_ids`: Shortcut list for retry, derived from `error_list`
-
-**Examples:**
-
-```python
-# Batch redeem
-result = service.redeem(["0x...", "0x..."], batch_size=10)
-```
-
-##### `redeem_all(batch_size: int = 20) -> RedeemResult`
-
-Redeem all positions that are currently redeemable for the authenticated account.
-
-**Returns:**
-- `RedeemResult`: Empty `success_list` and `error_list` if no redeemable positions. Partial failures are surfaced in `error_list` instead of returning `None`.
-
-**Examples:**
-
-```python
-# Redeem all positions that can be redeemed
-service.redeem_all(batch_size=10)
-```
-
-See [`examples/example_redeem.py`](examples/example_redeem.py) for a complete redeem example.
-
-##### `split(condition_id: str, amount: int | float | str, negative_risk: bool | None = None)`
-
-Split a binary (Yes/No) position. `amount` is in human USDC units.
-
-**Parameters:**
-- `condition_id` (str): Condition ID
-- `amount` (int | float | str): Amount in USDC
-- `negative_risk` (bool | None): Optional explicit market-type hint. When `None`, the SDK auto-detects via the official Gamma markets API and routes neg-risk markets to the NegRisk Adapter.
-
-**Returns:**
-- `dict | None`: Transaction result
-
-**Examples:**
-
-```python
-result = service.split("0x...", 1.25)
-```
-
-##### `merge(condition_id: str, amount: int | float | str, negative_risk: bool | None = None)`
-
-Merge a binary (Yes/No) position. `amount` is in human USDC units.
-
-**Parameters:**
-- `condition_id` (str): Condition ID
-- `amount` (int | float | str): Amount in USDC
-- `negative_risk` (bool | None): Optional explicit market-type hint. When `None`, the SDK auto-detects via the official Gamma markets API and routes neg-risk markets to the NegRisk Adapter.
-
-**Returns:**
-- `dict | None`: Transaction result
-
-**Examples:**
-
-```python
-result = service.merge("0x...", 1.25)
-```
-
-##### `plan_merge_all(min_usdc: int | float | str = 5, exclude_neg_risk: bool = True) -> list[MergePlanItem]`
-
-Scan all current positions and compute merge opportunities without submitting transactions.
-
-**Returns:**
-- `list[MergePlanItem]`: Each item includes `condition_id`, `market_slug`, `yes_balance`, `no_balance`, `mergeable`, `negative_risk`, and `reason`
-
-**Examples:**
-
-```python
-plan = service.plan_merge_all(min_usdc=5, exclude_neg_risk=True)
-```
-
-##### `merge_all(min_usdc: int | float | str = 5, exclude_neg_risk: bool = True, max_markets: int = 20, batch_size: int = 10) -> MergeAllResult`
-
-Plan and optionally execute merge operations for current positions.
-
-**Parameters:**
-- `min_usdc` (int | float | str): Skip mergeable amounts below this threshold
-- `exclude_neg_risk` (bool): Skip neg-risk markets in this first-pass bulk merge flow
-- `max_markets` (int): Maximum number of mergeable markets to execute in one call
-- `batch_size` (int): Maximum transactions submitted per grouped merge batch
-
-**Returns:**
-- `MergeAllResult`: Contains `plan_list`, `success_list`, `error_list`, and `error_condition_ids`
-
-**Examples:**
-
-```python
-result = service.merge_all(
-    min_usdc=5,
-    exclude_neg_risk=True,
-    max_markets=20,
-    batch_size=10,
-)
-```
-
-
-## Project Structure
+## 六、仓库结构（节选）
 
 ```
-├── poly_web3/               # SDK (redeem / split / merge)
-│   ├── __init__.py
-│   ├── web3_service/
-│   └── signature/
-├── analysis_poly/           # Profit web app + engine
-│   ├── web.py
-│   ├── static/dist/       # Built UI (npm; tracked)
-│   └── templates/
-├── poly_position_watcher/   # Position / trade utilities
-├── frontend/                # React + ECharts sources → analysis_poly/static/dist
-├── examples/
+├── poly_web3/             # SDK：redeem / split / merge
+├── analysis_poly/         # 分析引擎 + FastAPI + 前端静态资源
+├── poly_position_watcher/ # 仓位与成交相关工具
+├── frontend/              # React 源码 → 构建到 analysis_poly/static/dist
+├── examples/              # 可运行示例脚本
 ├── tests/
-│   ├── sdk/
-│   ├── analysis/
-│   └── watcher/
-└── pyproject.toml           # Single package distribution: poly-web3
+└── pyproject.toml
 ```
 
-## Notes
+---
 
-1. **Environment Variable Security**: Make sure `.env` file is added to `.gitignore`, do not commit sensitive information to the code repository
-2. **Network Support**: Currently mainly supports Polygon mainnet (chain_id: 137), Amoy testnet may have limited functionality
-3. **Wallet Type**: Proxy (signature_type: 1) and Safe (signature_type: 2) are supported; EOA wallet operations are under development
-4. **Gas Fees**: Transactions are executed through Relayer, gas fees are handled by the Relayer
-
-## Development
-
-### Install Development Dependencies
+## 七、开发与测试
 
 ```bash
 pip install -e ".[dev]"
-# or: uv pip install -e ".[dev]"
-```
-
-### Tests
-
-```bash
 python -m pytest tests/
 ```
 
-### Run Examples
+运行示例：
 
 ```bash
 python examples/example_redeem.py
 python examples/example_split_merge.py
 ```
 
-### Contributing
+---
 
-Simple contribution flow:
+## 许可证与链接
 
-1. Open an Issue to describe the change (bug/feature/doc).
-2. Fork and create a branch: `feat/xxx` or `fix/xxx`.
-3. Make changes and update/add docs if needed.
-4. Run: `uv run python -m examples.example_redeem` or `uv run python -m examples.example_split_merge` (if applicable).
-5. Open a Pull Request and link the Issue.
-
-## License
-
-MIT
-
-## Author
-
-PinBar
-
-## Related Links
-
-- [Polymarket](https://polymarket.com/)
-- [Polygon Network](https://polygon.technology/)
+- 许可证：MIT  
+- [Polymarket](https://polymarket.com/) · [Polygon](https://polygon.technology/)

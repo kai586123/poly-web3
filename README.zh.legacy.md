@@ -1,14 +1,16 @@
 # poly-web3
 
+> **说明：** 本文件为历史存档。当前请以仓库根目录下的 **[README.md](README.md)**（中文）与 **[README.en.md](README.en.md)**（英文）为准。
+
 ![PyPI](https://img.shields.io/pypi/v/poly-web3)
 ![Python](https://img.shields.io/pypi/pyversions/poly-web3)
 ![License](https://img.shields.io/github/license/tosmart01/poly-web3)
 
 Polymarket Proxy 与 Safe 钱包赎回与拆分/合并仓位的 Python SDK，免 gas 费。
 
-[English](README.md) | 中文
+[English](README.en.md) | 中文（存档）
 
-本仓库为 **单体仓库**：`poly_web3`（SDK）、`analysis_poly`（盈利分析网页）、`poly_position_watcher`（仓位工具）可通过一次本地可编辑安装全部获得。详见 [English README](README.md) 中的 **Monorepo layout**。
+本仓库为 **单体仓库**：`poly_web3`（SDK）、`analysis_poly`（盈利分析网页）、`poly_position_watcher`（仓位工具）可通过一次本地可编辑安装全部获得。详见 [English README](README.en.md) 中的 **Monorepo layout**。
 
 ```bash
 # 从本仓库根目录本地安装（推荐）
