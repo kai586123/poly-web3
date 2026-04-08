@@ -133,6 +133,54 @@ function parseBootstrapFromQuery(searchText) {
   return { patch, autoStart };
 }
 
+function buildEmptySessionAnalytics() {
+  return {
+    diagnostics: {
+      total_detected_sessions: 0,
+      closed_sessions: 0,
+      chart_eligible_sessions: 0,
+      excluded_open_session_count: 0,
+      excluded_no_trade_entry_count: 0,
+      excluded_zero_open_notional_count: 0,
+      excluded_warning_session_count: 0,
+    },
+    trade_sessions: [],
+    open_hour_buckets: Array.from({ length: 24 }, (_, hour) => ({
+      hour_utc: hour,
+      session_count: 0,
+      weighted_return_on_open_notional_pct: 0,
+      average_return_on_open_notional_pct: 0,
+      sum_realized_pnl_usdc: 0,
+      sum_open_notional_usdc: 0,
+    })),
+    open_price_buckets: [],
+  };
+}
+
+function normalizeSessionAnalytics(raw) {
+  const empty = buildEmptySessionAnalytics();
+  if (!raw || typeof raw !== "object") {
+    return empty;
+  }
+
+  const diagnostics = { ...empty.diagnostics, ...(raw.diagnostics || {}) };
+  const hourById = new Map(
+    (Array.isArray(raw.open_hour_buckets) ? raw.open_hour_buckets : []).map((bucket) => [Number(bucket.hour_utc), bucket]),
+  );
+  const openHourBuckets = Array.from({ length: 24 }, (_, hour) => ({
+    ...empty.open_hour_buckets[hour],
+    ...(hourById.get(hour) || {}),
+    hour_utc: hour,
+  }));
+
+  return {
+    diagnostics,
+    trade_sessions: Array.isArray(raw.trade_sessions) ? raw.trade_sessions : [],
+    open_hour_buckets: openHourBuckets,
+    open_price_buckets: Array.isArray(raw.open_price_buckets) ? raw.open_price_buckets : [],
+  };
+}
+
 export default function App({ serverDefaults }) {
   const [formData, setFormData] = useState(() => buildDefaultForm(serverDefaults));
   const [runId, setRunId] = useState(null);
@@ -151,8 +199,7 @@ export default function App({ serverDefaults }) {
   const [symbolSeries, setSymbolSeries] = useState({});
   const [symbolSeriesNoFee, setSymbolSeriesNoFee] = useState({});
   const [drawdownMarkers, setDrawdownMarkers] = useState([]);
-  const [hourlyPnl, setHourlyPnl] = useState(() => Array(24).fill(0));
-  const [scatterPoints, setScatterPoints] = useState([]);
+  const [sessionAnalytics, setSessionAnalytics] = useState(buildEmptySessionAnalytics);
 
   const eventSourceRef = useRef(null);
   const bootstrapHandledRef = useRef(false);
@@ -164,7 +211,7 @@ export default function App({ serverDefaults }) {
   useEffect(() => {
     const end = new Date();
     end.setSeconds(0, 0);
-    const start = new Date(end.getTime() - 3 * 24 * 60 * 60 * 1000);
+    const start = new Date(end.getTime() - 24 * 60 * 60 * 1000);
     setFormData((prev) => ({
       ...prev,
       startTime: prev.startTime || toDateTimeText(start),
@@ -241,8 +288,7 @@ export default function App({ serverDefaults }) {
     setSymbolSeries({});
     setSymbolSeriesNoFee({});
     setDrawdownMarkers([]);
-    setHourlyPnl(Array(24).fill(0));
-    setScatterPoints([]);
+    setSessionAnalytics(buildEmptySessionAnalytics());
   }
 
   function clearRunData() {
@@ -299,12 +345,6 @@ export default function App({ serverDefaults }) {
     const byTs = totalByTsRef.current;
     byTs.set(ts, (byTs.get(ts) || 0) + d);
     recomputeTotalSeries();
-    const hour = new Date(ts * 1000).getUTCHours();
-    setHourlyPnl((prev) => {
-      const next = prev.length === 24 ? [...prev] : Array(24).fill(0);
-      next[hour] = (Number(next[hour]) || 0) + d;
-      return next;
-    });
   }
 
   function appendSymbolDelta(symbol, timestamp, delta) {
@@ -372,19 +412,7 @@ export default function App({ serverDefaults }) {
     }
     setSymbolSeriesNoFee(nextNoFeeSymbolSeries);
 
-    const hr = report.hourly_realized_pnl_usdc;
-    if (Array.isArray(hr) && hr.length === 24) {
-      setHourlyPnl(hr.map((x) => Number(x || 0)));
-    } else {
-      const fallback = Array(24).fill(0);
-      const totals = reduceCurveDelta(report.total_curve || []);
-      for (const [ts, delta] of totals.entries()) {
-        const h = new Date(Number(ts) * 1000).getUTCHours();
-        fallback[h] += Number(delta || 0);
-      }
-      setHourlyPnl(fallback);
-    }
-    setScatterPoints(Array.isArray(report.market_scatter) ? report.market_scatter : []);
+    setSessionAnalytics(normalizeSessionAnalytics(report.session_analytics));
   }
 
   function recomputeTotalSeriesNoFee() {
@@ -561,7 +589,6 @@ export default function App({ serverDefaults }) {
       concurrency: Number(sourceFormData.concurrency),
       page_limit: Number(sourceFormData.pageLimit),
       request_timeout_sec: 20,
-      output_dir: "reports",
     };
   }
 
@@ -641,7 +668,7 @@ export default function App({ serverDefaults }) {
           drawdownMarkers={drawdownMarkers}
         />
 
-        <InsightCharts hourlyPnl={hourlyPnl} scatterPoints={scatterPoints} />
+        <InsightCharts sessionAnalytics={sessionAnalytics} />
 
         <QuantMetricsPanel totalSeries={totalSeries} totalSeriesNoFee={totalSeriesNoFee} markets={markets} />
 

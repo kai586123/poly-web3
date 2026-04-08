@@ -5,12 +5,12 @@ import re
 from pathlib import Path
 
 from .models import PolymarketMarket
+from .storage_paths import default_market_metadata_cache_dir
 
 
 class MarketMetadataCache:
-    def __init__(self, cache_dir: str | Path = ".cache/market_by_slug", recent_window_sec: int = 30 * 60):
-        self._cache_dir = Path(cache_dir)
-        self._cache_dir.mkdir(parents=True, exist_ok=True)
+    def __init__(self, cache_dir: str | Path | None = None, recent_window_sec: int = 30 * 60):
+        self._cache_dir = Path(cache_dir) if cache_dir is not None else default_market_metadata_cache_dir()
         self._recent_window_sec = recent_window_sec
         self._symbol_payload_cache: dict[str, dict] = {}
         self._market_obj_cache: dict[str, PolymarketMarket] = {}
@@ -93,6 +93,7 @@ class MarketMetadataCache:
 
     def _save_symbol_payload(self, symbol: str, payload: dict) -> None:
         path = self._path_for_symbol(symbol)
+        path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_suffix(".tmp")
         try:
             tmp_path.write_text(

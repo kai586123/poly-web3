@@ -20,7 +20,12 @@ from .models import (
     MarketReport,
     MarketScatterPoint,
     PolymarketMarket,
+    SessionAnalytics,
+    SessionAnalyticsDiagnostics,
+    SessionOpenHourBucket,
+    SessionOpenPriceBucket,
     SummaryStats,
+    TradeSession,
     TradeRecord,
     WarningItem,
 )
@@ -31,6 +36,8 @@ from .slugs import MarketSlugSpec, generate_market_slug_specs
 MARKET_FETCH_CONCURRENCY_DEFAULT = 10
 MARKET_TIMESTAMP_CHUNK_SIZE_DEFAULT = 20
 MARKET_RESULT_CACHE_RECENT_WINDOW_SEC = 30 * 60
+SESSION_PRICE_BIN_WIDTH = 0.01
+SESSION_PRICE_BIN_COUNT = 100
 
 
 @dataclass
@@ -41,6 +48,8 @@ class _MarketProcessResult:
     deltas: list[PnlDelta]
     deltas_no_fee: list[PnlDelta]
     warnings: list[WarningItem]
+    trade_sessions: list[TradeSession]
+    session_diagnostics: SessionAnalyticsDiagnostics
     cache_updated: bool = False
     scatter_point: MarketScatterPoint | None = None
 
@@ -124,6 +133,8 @@ class PolymarketProfitAnalyzer:
         all_warnings: list[WarningItem] = []
         market_reports: list[MarketReport] = []
         market_scatter_points: list[MarketScatterPoint] = []
+        trade_sessions: list[TradeSession] = []
+        session_diagnostics = SessionAnalyticsDiagnostics()
         total_deltas: list[PnlDelta] = []
         total_deltas_no_fee: list[PnlDelta] = []
         market_deltas: dict[str, list[PnlDelta]] = defaultdict(list)
@@ -205,6 +216,24 @@ class PolymarketProfitAnalyzer:
                                 market_deltas_no_fee[result.market_slug].extend(result.deltas_no_fee)
                         else:
                             logger.debug("skip market without trades in output slug={}", result.market_slug)
+
+                        if result.trade_sessions:
+                            trade_sessions.extend(result.trade_sessions)
+                        session_diagnostics.total_detected_sessions += result.session_diagnostics.total_detected_sessions
+                        session_diagnostics.closed_sessions += result.session_diagnostics.closed_sessions
+                        session_diagnostics.chart_eligible_sessions += result.session_diagnostics.chart_eligible_sessions
+                        session_diagnostics.excluded_open_session_count += (
+                            result.session_diagnostics.excluded_open_session_count
+                        )
+                        session_diagnostics.excluded_no_trade_entry_count += (
+                            result.session_diagnostics.excluded_no_trade_entry_count
+                        )
+                        session_diagnostics.excluded_zero_open_notional_count += (
+                            result.session_diagnostics.excluded_zero_open_notional_count
+                        )
+                        session_diagnostics.excluded_warning_session_count += (
+                            result.session_diagnostics.excluded_warning_session_count
+                        )
 
                         for warning in result.warnings:
                             all_warnings.append(warning)
@@ -310,6 +339,7 @@ class PolymarketProfitAnalyzer:
                 markets_total=total_markets,
                 markets_processed=len(market_reports),
             )
+            session_analytics = _build_session_analytics(trade_sessions, session_diagnostics)
 
             report = AnalysisReport(
                 request=req,
@@ -323,6 +353,7 @@ class PolymarketProfitAnalyzer:
                 is_partial=stop_event.is_set() and len(market_reports) < total_markets,
                 hourly_realized_pnl_usdc=_build_hourly_pnl_buckets(total_deltas),
                 market_scatter=sorted(market_scatter_points, key=lambda x: x.market_slug),
+                session_analytics=session_analytics,
             )
 
             return report
@@ -407,13 +438,16 @@ class PolymarketProfitAnalyzer:
             client.get_activity(req.address, market.condition_id, "REDEEM", req.page_limit),
         )
 
-        market_report, deltas, warnings = engine.process_market(
+        replay = engine.analyze_market(
             market=market,
             taker_trades=taker_trades,
             all_trades=all_trades,
             split_activities=split_acts,
             redeem_activities=redeem_acts,
         )
+        market_report = replay.report
+        deltas = replay.deltas
+        warnings = replay.warnings
         market_report_no_fee, deltas_no_fee, _ = engine_no_fee.process_market(
             market=market,
             taker_trades=taker_trades,
@@ -435,6 +469,8 @@ class PolymarketProfitAnalyzer:
             deltas=deltas,
             deltas_no_fee=deltas_no_fee,
             warnings=warnings,
+            trade_sessions=replay.trade_sessions,
+            session_diagnostics=replay.session_diagnostics,
             scatter_point=scatter_point,
         )
         if use_result_cache:
@@ -542,6 +578,102 @@ def _compute_market_scatter_point(
     )
 
 
+def _build_session_analytics(
+    sessions: list[TradeSession],
+    diagnostics: SessionAnalyticsDiagnostics,
+) -> SessionAnalytics:
+    ordered_sessions = sorted(sessions, key=lambda s: (_market_order_key(s.market_slug), s.start_timestamp, s.end_timestamp))
+    hour_acc = {
+        hour: {
+            "count": 0,
+            "sum_pnl": 0.0,
+            "sum_notional": 0.0,
+            "sum_return": 0.0,
+        }
+        for hour in range(24)
+    }
+    price_acc: dict[int, dict[str, float]] = defaultdict(
+        lambda: {
+            "count": 0,
+            "sum_pnl": 0.0,
+            "sum_notional": 0.0,
+            "sum_return": 0.0,
+        }
+    )
+
+    for session in ordered_sessions:
+        if (
+            not session.is_chart_eligible
+            or session.open_hour_utc is None
+            or session.open_avg_price is None
+            or session.return_on_open_notional_pct is None
+        ):
+            continue
+        hour_stats = hour_acc[int(session.open_hour_utc)]
+        hour_stats["count"] += 1
+        hour_stats["sum_pnl"] += float(session.realized_pnl_usdc)
+        hour_stats["sum_notional"] += float(session.open_notional_usdc)
+        hour_stats["sum_return"] += float(session.return_on_open_notional_pct)
+
+        price_stats = price_acc[_price_bucket_index(float(session.open_avg_price))]
+        price_stats["count"] += 1
+        price_stats["sum_pnl"] += float(session.realized_pnl_usdc)
+        price_stats["sum_notional"] += float(session.open_notional_usdc)
+        price_stats["sum_return"] += float(session.return_on_open_notional_pct)
+
+    hour_buckets = [
+        SessionOpenHourBucket(
+            hour_utc=hour,
+            session_count=int(stats["count"]),
+            weighted_return_on_open_notional_pct=round(
+                (stats["sum_pnl"] / stats["sum_notional"]) * 100.0 if stats["sum_notional"] > 1e-12 else 0.0,
+                6,
+            ),
+            average_return_on_open_notional_pct=round(
+                stats["sum_return"] / stats["count"] if stats["count"] else 0.0,
+                6,
+            ),
+            sum_realized_pnl_usdc=round(stats["sum_pnl"], 10),
+            sum_open_notional_usdc=round(stats["sum_notional"], 10),
+        )
+        for hour, stats in hour_acc.items()
+    ]
+
+    price_buckets = [
+        SessionOpenPriceBucket(
+            bin_index=idx,
+            bin_start_price=round(idx * SESSION_PRICE_BIN_WIDTH, 2),
+            bin_end_price=round(min(1.0, (idx + 1) * SESSION_PRICE_BIN_WIDTH), 2),
+            session_count=int(stats["count"]),
+            weighted_return_on_open_notional_pct=round(
+                (stats["sum_pnl"] / stats["sum_notional"]) * 100.0 if stats["sum_notional"] > 1e-12 else 0.0,
+                6,
+            ),
+            average_return_on_open_notional_pct=round(
+                stats["sum_return"] / stats["count"] if stats["count"] else 0.0,
+                6,
+            ),
+            sum_realized_pnl_usdc=round(stats["sum_pnl"], 10),
+            sum_open_notional_usdc=round(stats["sum_notional"], 10),
+        )
+        for idx, stats in sorted(price_acc.items())
+    ]
+
+    return SessionAnalytics(
+        diagnostics=diagnostics,
+        trade_sessions=ordered_sessions,
+        open_hour_buckets=hour_buckets,
+        open_price_buckets=price_buckets,
+    )
+
+
+def _price_bucket_index(price: float) -> int:
+    clamped = max(0.0, min(float(price), 1.0))
+    if clamped >= 1.0:
+        return SESSION_PRICE_BIN_COUNT - 1
+    return min(SESSION_PRICE_BIN_COUNT - 1, max(0, int(clamped / SESSION_PRICE_BIN_WIDTH)))
+
+
 def _cumulative_at(by_ts: dict[int, float], ts: int) -> float:
     cumulative = 0.0
     for key in sorted(by_ts.keys()):
@@ -594,6 +726,8 @@ def _result_to_cache_payload(result: _MarketProcessResult) -> dict:
         "deltas": [_delta_to_dict(d) for d in result.deltas],
         "deltas_no_fee": [_delta_to_dict(d) for d in result.deltas_no_fee],
         "warnings": [w.model_dump() for w in result.warnings],
+        "trade_sessions": [s.model_dump() for s in result.trade_sessions],
+        "session_diagnostics": result.session_diagnostics.model_dump(),
     }
     if result.scatter_point is not None:
         payload["scatter_point"] = result.scatter_point.model_dump()
@@ -607,6 +741,8 @@ def _result_from_cache_payload(slug: str, payload: dict) -> _MarketProcessResult
         deltas = [_delta_from_dict(d) for d in payload.get("deltas", [])]
         deltas_no_fee = [_delta_from_dict(d) for d in payload.get("deltas_no_fee", [])]
         warnings = [WarningItem.model_validate(w) for w in payload.get("warnings", [])]
+        trade_sessions = [TradeSession.model_validate(s) for s in payload.get("trade_sessions", [])]
+        session_diagnostics = SessionAnalyticsDiagnostics.model_validate(payload.get("session_diagnostics", {}))
         scatter_raw = payload.get("scatter_point")
         scatter_point = (
             MarketScatterPoint.model_validate(scatter_raw) if scatter_raw is not None else None
@@ -618,6 +754,8 @@ def _result_from_cache_payload(slug: str, payload: dict) -> _MarketProcessResult
             deltas=deltas,
             deltas_no_fee=deltas_no_fee,
             warnings=warnings,
+            trade_sessions=trade_sessions,
+            session_diagnostics=session_diagnostics,
             scatter_point=scatter_point,
         )
     except Exception:  # noqa: BLE001

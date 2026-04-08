@@ -5,14 +5,6 @@ import { Card, Col, Row, Typography } from "antd";
 
 const { Text } = Typography;
 
-function compactSlug(slug, maxLen = 30) {
-  const text = String(slug || "");
-  if (text.length <= maxLen) {
-    return text;
-  }
-  return `${text.slice(0, maxLen - 1)}…`;
-}
-
 function barGradient(positive) {
   if (positive) {
     return new echarts.graphic.LinearGradient(0, 0, 0, 1, [
@@ -31,13 +23,39 @@ const neutralGrad = new echarts.graphic.LinearGradient(0, 0, 0, 1, [
   { offset: 1, color: "#94a3b8" },
 ]);
 
-export default function InsightCharts({ hourlyPnl, scatterPoints }) {
-  const hourlyOption = useMemo(() => {
-    const buckets = hourlyPnl?.length === 24 ? hourlyPnl : Array(24).fill(0);
-    const categories = Array.from({ length: 24 }, (_, i) => `${String(i).padStart(2, "0")}:00`);
+function formatUsd(value) {
+  const amount = Number(value || 0);
+  const sign = amount < 0 ? "−" : "";
+  return `${sign}$${Math.abs(amount).toFixed(4)}`;
+}
 
-    const data = buckets.map((raw) => {
-      const val = Number(raw || 0);
+function formatBucketLabel(row) {
+  const start = Number(row?.bin_start_price || 0);
+  const end = Number(row?.bin_end_price || 0);
+  const close = end >= 1 ? "]" : ")";
+  return `[${start.toFixed(2)}, ${end.toFixed(2)}${close}`;
+}
+
+export default function InsightCharts({ sessionAnalytics }) {
+  const diagnostics = sessionAnalytics?.diagnostics || {};
+  const hourRows =
+    Array.isArray(sessionAnalytics?.open_hour_buckets) && sessionAnalytics.open_hour_buckets.length === 24
+      ? sessionAnalytics.open_hour_buckets
+      : Array.from({ length: 24 }, (_, hour) => ({
+          hour_utc: hour,
+          session_count: 0,
+          weighted_return_on_open_notional_pct: 0,
+          average_return_on_open_notional_pct: 0,
+          sum_realized_pnl_usdc: 0,
+          sum_open_notional_usdc: 0,
+        }));
+  const priceRows = Array.isArray(sessionAnalytics?.open_price_buckets) ? sessionAnalytics.open_price_buckets : [];
+  const eligibleSessionCount = Number(diagnostics.chart_eligible_sessions || 0);
+
+  const hourlyOption = useMemo(() => {
+    const categories = hourRows.map((row) => `${String(Number(row.hour_utc || 0)).padStart(2, "0")}:00`);
+    const data = hourRows.map((row) => {
+      const val = Number(row.weighted_return_on_open_notional_pct || 0);
       let color = neutralGrad;
       if (val > 0) {
         color = barGradient(true);
@@ -46,6 +64,7 @@ export default function InsightCharts({ hourlyPnl, scatterPoints }) {
       }
       return {
         value: val,
+        raw: row,
         itemStyle: {
           borderRadius: [6, 6, 2, 2],
           color,
@@ -58,8 +77,8 @@ export default function InsightCharts({ hourlyPnl, scatterPoints }) {
     return {
       animationDuration: 420,
       title: {
-        text: "Realized PnL by UTC hour",
-        subtext: "24 bars — sum of incremental PnL when events occur in each clock hour (UTC)",
+        text: "Average Return by Session Open Hour",
+        subtext: "Closed flat-to-flat sessions, grouped by the UTC hour of the first BUY that opened the session",
         left: 14,
         top: 6,
         textStyle: { color: "#213047", fontWeight: 700, fontSize: 17 },
@@ -74,17 +93,24 @@ export default function InsightCharts({ hourlyPnl, scatterPoints }) {
         textStyle: { color: "#213047", fontSize: 12 },
         axisPointer: { type: "shadow", shadowStyle: { color: "rgba(44,167,180,0.08)" } },
         formatter: (params) => {
-          const row = Array.isArray(params) ? params[0] : params;
-          const idx = row?.dataIndex ?? 0;
-          const v = Number(buckets[idx] || 0);
-          const sign = v < 0 ? "−" : "";
-          return `${categories[idx]} UTC<br/><b>${sign}$${Math.abs(v).toFixed(4)}</b> <span style="color:#617089">USDC</span>`;
+          const row = Array.isArray(params) ? params[0]?.data?.raw : params?.data?.raw;
+          if (!row) {
+            return "";
+          }
+          return [
+            `<b>${categories[Number(row.hour_utc || 0)]} UTC</b>`,
+            `Weighted return: <b>${Number(row.weighted_return_on_open_notional_pct || 0).toFixed(2)}%</b>`,
+            `Unweighted mean: <b>${Number(row.average_return_on_open_notional_pct || 0).toFixed(2)}%</b>`,
+            `Closed sessions: <b>${Number(row.session_count || 0)}</b>`,
+            `Open notional: <b>${formatUsd(row.sum_open_notional_usdc)}</b>`,
+            `Realized PnL: <b>${formatUsd(row.sum_realized_pnl_usdc)}</b>`,
+          ].join("<br/>");
         },
       },
       xAxis: {
         type: "category",
         data: categories,
-        axisLabel: { color: "#617089", fontSize: 11, interval: 1, rotate: 0 },
+        axisLabel: { color: "#617089", fontSize: 11, interval: 1 },
         axisTick: { alignWithLabel: true },
         axisLine: { lineStyle: { color: "rgba(146,160,181,0.35)" } },
       },
@@ -92,13 +118,13 @@ export default function InsightCharts({ hourlyPnl, scatterPoints }) {
         type: "value",
         axisLabel: {
           color: "#617089",
-          formatter: (value) => Number(value).toFixed(2),
+          formatter: (value) => `${Number(value).toFixed(1)}%`,
         },
         splitLine: { lineStyle: { color: "rgba(146,160,181,0.2)" } },
       },
       series: [
         {
-          name: "Δ PnL",
+          name: "Weighted return",
           type: "bar",
           barMaxWidth: 18,
           emphasis: {
@@ -109,31 +135,30 @@ export default function InsightCharts({ hourlyPnl, scatterPoints }) {
         },
       ],
     };
-  }, [hourlyPnl]);
+  }, [hourRows]);
 
-  const scatterOption = useMemo(() => {
-    const rows = Array.isArray(scatterPoints) ? scatterPoints : [];
-    const data = rows.map((p) => {
-      const x = Number(p.avg_entry_price ?? 0);
-      const y = Number(p.return_on_cost_pct ?? 0);
-      const pnl = Number(p.realized_pnl_usdc ?? 0);
-      const notional = Number(p.buy_notional_usdc ?? 0);
-      const sz = Math.max(10, Math.min(40, 10 + Math.sqrt(Math.max(notional, 0)) * 2.2));
-      const win = pnl >= 0;
+  const priceOption = useMemo(() => {
+    const data = priceRows.map((row) => {
+      const start = Number(row.bin_start_price || 0);
+      const end = Number(row.bin_end_price || 0);
+      const x = (start + end) / 2;
+      const y = Number(row.weighted_return_on_open_notional_pct || 0);
+      const sessions = Number(row.session_count || 0);
       return {
         value: [x, y],
-        name: p.market_slug,
-        symbolSize: sz,
+        symbolSize: Math.max(10, Math.min(34, 10 + Math.sqrt(Math.max(sessions, 0)) * 3.5)),
+        raw: row,
         itemStyle: {
-          color: win
-            ? new echarts.graphic.RadialGradient(0.35, 0.35, 0.9, [
-                { offset: 0, color: "#6ee7b7" },
-                { offset: 1, color: "#059669" },
-              ])
-            : new echarts.graphic.RadialGradient(0.35, 0.35, 0.9, [
-                { offset: 0, color: "#fdba74" },
-                { offset: 1, color: "#c2410c" },
-              ]),
+          color:
+            y >= 0
+              ? new echarts.graphic.RadialGradient(0.35, 0.35, 0.9, [
+                  { offset: 0, color: "#6ee7b7" },
+                  { offset: 1, color: "#059669" },
+                ])
+              : new echarts.graphic.RadialGradient(0.35, 0.35, 0.9, [
+                  { offset: 0, color: "#fdba74" },
+                  { offset: 1, color: "#c2410c" },
+                ]),
           borderColor: "rgba(255,255,255,0.85)",
           borderWidth: 1.5,
           shadowBlur: 6,
@@ -145,8 +170,8 @@ export default function InsightCharts({ hourlyPnl, scatterPoints }) {
     return {
       animationDuration: 480,
       title: {
-        text: "Entry vs return",
-        subtext: "Each point is one market: VWAP of BUY fills (token price) vs return on buy notional",
+        text: "Average Return by Session Open Price Bucket",
+        subtext: "Cross-market 0.01 price buckets using the session's BUY VWAP as the opening price",
         left: 14,
         top: 6,
         textStyle: { color: "#213047", fontWeight: 700, fontSize: 17 },
@@ -160,25 +185,22 @@ export default function InsightCharts({ hourlyPnl, scatterPoints }) {
         borderWidth: 1,
         textStyle: { color: "#213047", fontSize: 12 },
         formatter: (param) => {
-          const v = param?.data?.value || [];
-          const x = Number(v[0] ?? 0);
-          const y = Number(v[1] ?? 0);
-          const name = param?.data?.name || param?.name || "";
-          const row = rows.find((r) => r.market_slug === name) || {};
-          const pnl = Number(row.realized_pnl_usdc ?? 0);
-          const notional = Number(row.buy_notional_usdc ?? 0);
+          const row = param?.data?.raw || {};
           return [
-            `<b>${compactSlug(name, 42)}</b>`,
-            `Avg entry: <b>${x.toFixed(4)}</b>`,
-            `Return on cost: <b>${y.toFixed(2)}%</b>`,
-            `Realized PnL: <b>$${pnl.toFixed(4)}</b>`,
-            `Buy notional: <b>$${notional.toFixed(2)}</b>`,
+            `<b>${formatBucketLabel(row)}</b>`,
+            `Weighted return: <b>${Number(row.weighted_return_on_open_notional_pct || 0).toFixed(2)}%</b>`,
+            `Unweighted mean: <b>${Number(row.average_return_on_open_notional_pct || 0).toFixed(2)}%</b>`,
+            `Closed sessions: <b>${Number(row.session_count || 0)}</b>`,
+            `Open notional: <b>${formatUsd(row.sum_open_notional_usdc)}</b>`,
+            `Realized PnL: <b>${formatUsd(row.sum_realized_pnl_usdc)}</b>`,
           ].join("<br/>");
         },
       },
       xAxis: {
         type: "value",
-        name: "Avg entry (USDC / share)",
+        min: 0,
+        max: 1,
+        name: "Open price bucket center",
         nameLocation: "middle",
         nameGap: 28,
         nameTextStyle: { color: "#617089", fontSize: 11 },
@@ -187,18 +209,18 @@ export default function InsightCharts({ hourlyPnl, scatterPoints }) {
       },
       yAxis: {
         type: "value",
-        name: "Return on cost %",
+        name: "Weighted return %",
         nameTextStyle: { color: "#617089", fontSize: 11 },
         axisLabel: { color: "#617089", formatter: (v) => `${Number(v).toFixed(1)}%` },
         splitLine: { lineStyle: { color: "rgba(146,160,181,0.18)" } },
       },
       series: [
         {
-          name: "Markets",
+          name: "Price buckets",
           type: "scatter",
           data,
           symbol: "circle",
-          large: rows.length > 120,
+          large: data.length > 120,
           largeThreshold: 120,
           emphasis: {
             scale: 1.08,
@@ -207,30 +229,45 @@ export default function InsightCharts({ hourlyPnl, scatterPoints }) {
         },
       ],
     };
-  }, [scatterPoints]);
+  }, [priceRows]);
 
-  const emptyScatter = !(scatterPoints && scatterPoints.length);
+  const diagnosticsText = [
+    `Eligible sessions: ${eligibleSessionCount}`,
+    `Closed: ${Number(diagnostics.closed_sessions || 0)}`,
+    `Open at window end: ${Number(diagnostics.excluded_open_session_count || 0)}`,
+    `No trade entry: ${Number(diagnostics.excluded_no_trade_entry_count || 0)}`,
+    `Warning-filtered: ${Number(diagnostics.excluded_warning_session_count || 0)}`,
+  ].join(" · ");
 
   return (
     <Card className="chart-card insight-charts-card" bodyStyle={{ padding: 12 }}>
       <Row gutter={[12, 12]} align="stretch">
         <Col xs={24} lg={12}>
           <div className="chart-wrap chart-wrap-insights">
-            <ReactECharts option={hourlyOption} notMerge lazyUpdate style={{ height: "100%", width: "100%" }} />
+            {eligibleSessionCount <= 0 ? (
+              <div className="insight-empty-hint">
+                <Text type="secondary">No closed trade sessions with a trade-based opening price were found.</Text>
+              </div>
+            ) : (
+              <ReactECharts option={hourlyOption} notMerge lazyUpdate style={{ height: "100%", width: "100%" }} />
+            )}
           </div>
         </Col>
         <Col xs={24} lg={12}>
           <div className="chart-wrap chart-wrap-insights chart-wrap-scatter">
-            {emptyScatter ? (
+            {priceRows.length <= 0 ? (
               <div className="insight-empty-hint">
-                <Text type="secondary">Scatter appears after a full run (per-market VWAP & return).</Text>
+                <Text type="secondary">Price buckets appear after closed sessions with BUY-led openings are detected.</Text>
               </div>
             ) : (
-              <ReactECharts option={scatterOption} notMerge lazyUpdate style={{ height: "100%", width: "100%" }} />
+              <ReactECharts option={priceOption} notMerge lazyUpdate style={{ height: "100%", width: "100%" }} />
             )}
           </div>
         </Col>
       </Row>
+      <div style={{ padding: "8px 6px 2px" }}>
+        <Text type="secondary">{diagnosticsText}</Text>
+      </div>
     </Card>
   );
 }

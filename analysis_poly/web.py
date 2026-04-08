@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -12,11 +11,12 @@ from loguru import logger
 from .logging_config import configure_logging
 from .models import AnalysisRequest, RunCreated, RunState, RunStopAck
 from .run_manager import RunManager
+from .storage_paths import default_reports_dir
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = PACKAGE_DIR / "templates"
 STATIC_DIR = PACKAGE_DIR / "static"
-REPORTS_DIR = Path(os.getenv("ANALYSIS_POLY_REPORTS_DIR", "reports")).expanduser().resolve()
+REPORTS_DIR = default_reports_dir()
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 configure_logging()
 

@@ -6,6 +6,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from .storage_paths import default_reports_dir
+
 
 class RunStatus(str, Enum):
     PENDING = "PENDING"
@@ -28,7 +30,7 @@ class AnalysisRequest(BaseModel):
     page_limit: int = 1000
     concurrency: int = 5
     request_timeout_sec: float = 20
-    output_dir: str = "reports"
+    output_dir: str = Field(default_factory=lambda: str(default_reports_dir()))
 
     @field_validator("address")
     @classmethod
@@ -141,6 +143,63 @@ class MarketScatterPoint(BaseModel):
     buy_notional_usdc: float
 
 
+class TradeSession(BaseModel):
+    market_slug: str
+    start_timestamp: int
+    end_timestamp: int
+    open_timestamp: int | None = None
+    open_hour_utc: int | None = None
+    open_avg_price: float | None = None
+    open_notional_usdc: float = 0
+    open_qty: float = 0
+    realized_pnl_usdc: float = 0
+    return_on_open_notional_pct: float | None = None
+    event_count: int = 0
+    has_trade_entry: bool = False
+    is_chart_eligible: bool = False
+    exclusion_reason: str | None = None
+    warning_codes: list[str] = Field(default_factory=list)
+
+
+class SessionOpenHourBucket(BaseModel):
+    hour_utc: int
+    session_count: int = 0
+    weighted_return_on_open_notional_pct: float = 0
+    average_return_on_open_notional_pct: float = 0
+    sum_realized_pnl_usdc: float = 0
+    sum_open_notional_usdc: float = 0
+
+
+class SessionOpenPriceBucket(BaseModel):
+    bin_index: int
+    bin_start_price: float
+    bin_end_price: float
+    session_count: int = 0
+    weighted_return_on_open_notional_pct: float = 0
+    average_return_on_open_notional_pct: float = 0
+    sum_realized_pnl_usdc: float = 0
+    sum_open_notional_usdc: float = 0
+
+
+class SessionAnalyticsDiagnostics(BaseModel):
+    total_detected_sessions: int = 0
+    closed_sessions: int = 0
+    chart_eligible_sessions: int = 0
+    excluded_open_session_count: int = 0
+    excluded_no_trade_entry_count: int = 0
+    excluded_zero_open_notional_count: int = 0
+    excluded_warning_session_count: int = 0
+
+
+class SessionAnalytics(BaseModel):
+    diagnostics: SessionAnalyticsDiagnostics = Field(default_factory=SessionAnalyticsDiagnostics)
+    trade_sessions: list[TradeSession] = Field(default_factory=list)
+    open_hour_buckets: list[SessionOpenHourBucket] = Field(
+        default_factory=lambda: [SessionOpenHourBucket(hour_utc=hour) for hour in range(24)]
+    )
+    open_price_buckets: list[SessionOpenPriceBucket] = Field(default_factory=list)
+
+
 class AnalysisReport(BaseModel):
     request: AnalysisRequest
     summary: SummaryStats
@@ -157,6 +216,7 @@ class AnalysisReport(BaseModel):
         description="Sum of realized PnL deltas by UTC hour-of-day (0–23).",
     )
     market_scatter: list[MarketScatterPoint] = Field(default_factory=list)
+    session_analytics: SessionAnalytics = Field(default_factory=SessionAnalytics)
 
 
 class PolymarketMarket(BaseModel):

@@ -5,11 +5,14 @@ import re
 import time
 from pathlib import Path
 
+from .storage_paths import default_market_result_cache_dir
+
+RESULT_CACHE_SCHEMA_VERSION = 2
+
 
 class AddressMarketResultCache:
-    def __init__(self, cache_dir: str | Path = ".cache/address_market_results"):
-        self._cache_dir = Path(cache_dir)
-        self._cache_dir.mkdir(parents=True, exist_ok=True)
+    def __init__(self, cache_dir: str | Path | None = None):
+        self._cache_dir = Path(cache_dir) if cache_dir is not None else default_market_result_cache_dir()
 
     def load(self, address: str) -> dict[str, dict]:
         path = self._path_for_address(address)
@@ -18,6 +21,8 @@ class AddressMarketResultCache:
 
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
+            if int(payload.get("schema_version", 0)) != RESULT_CACHE_SCHEMA_VERSION:
+                return {}
             markets = payload.get("markets")
             if isinstance(markets, dict):
                 return markets
@@ -27,7 +32,9 @@ class AddressMarketResultCache:
 
     def save(self, address: str, markets: dict[str, dict]) -> None:
         path = self._path_for_address(address)
+        path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
+            "schema_version": RESULT_CACHE_SCHEMA_VERSION,
             "address": address.lower(),
             "updated_at": int(time.time()),
             "markets": markets,

@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from .models import (
     ActivityRecord,
     MarketReport,
     PolymarketMarket,
+    SessionAnalyticsDiagnostics,
     TokenReport,
+    TradeSession,
     WarningItem,
 )
 from .models import TradeRecord
@@ -60,6 +62,36 @@ class _Event:
     is_taker: bool = False
 
 
+@dataclass
+class _SessionAccumulator:
+    market_slug: str
+    start_timestamp: int
+    open_timestamp: int | None = None
+    open_notional_usdc: float = 0.0
+    open_qty: float = 0.0
+    realized_pnl_usdc: float = 0.0
+    event_count: int = 0
+    warning_codes: set[str] = field(default_factory=set)
+
+
+@dataclass
+class MarketReplayResult:
+    report: MarketReport
+    deltas: list[PnlDelta]
+    warnings: list[WarningItem]
+    trade_sessions: list[TradeSession]
+    session_diagnostics: SessionAnalyticsDiagnostics
+
+
+SESSION_EXCLUSION_WARNING_CODES = {
+    "REDEEM_SKIP_UNKNOWN_WINNER",
+    "SELL_OVERSELL_ZERO_COST",
+    "REDEEM_OVERSELL_ZERO_COST",
+    "CLOSED_MARKET_UNKNOWN_OUTCOME",
+    "CLOSED_MARKET_SETTLEMENT_ZERO_COST",
+}
+
+
 class ProfitEngine:
     def __init__(
         self,
@@ -81,12 +113,176 @@ class ProfitEngine:
         split_activities: list[ActivityRecord],
         redeem_activities: list[ActivityRecord],
     ) -> tuple[MarketReport, list[PnlDelta], list[WarningItem]]:
+        result = self.analyze_market(
+            market=market,
+            taker_trades=taker_trades,
+            all_trades=all_trades,
+            split_activities=split_activities,
+            redeem_activities=redeem_activities,
+        )
+        return result.report, result.deltas, result.warnings
+
+    def analyze_market(
+        self,
+        market: PolymarketMarket,
+        taker_trades: list[TradeRecord],
+        all_trades: list[TradeRecord],
+        split_activities: list[ActivityRecord],
+        redeem_activities: list[ActivityRecord],
+    ) -> MarketReplayResult:
         warnings: list[WarningItem] = []
         token_states: dict[str, _TokenState] = {
             market.up_token_id: _TokenState(token_id=market.up_token_id, outcome="Up", lots=deque()),
             market.down_token_id: _TokenState(token_id=market.down_token_id, outcome="Down", lots=deque()),
         }
 
+        events, build_warnings, maker_reward_enabled, has_maker_trade = self._build_market_events(
+            market=market,
+            taker_trades=taker_trades,
+            all_trades=all_trades,
+            split_activities=split_activities,
+            redeem_activities=redeem_activities,
+        )
+        warnings.extend(build_warnings)
+
+        events.sort(key=lambda e: (e.timestamp, e.tx, _event_priority(e.kind)))
+
+        pnl_deltas: list[PnlDelta] = []
+        trade_sessions: list[TradeSession] = []
+        session_diagnostics = SessionAnalyticsDiagnostics()
+        active_session: _SessionAccumulator | None = None
+        for event in events:
+            was_flat = _is_market_flat(token_states)
+            event_deltas: list[PnlDelta] = []
+            event_warnings: list[WarningItem] = []
+            if event.kind == "TRADE" and event.token_id in token_states:
+                token_state = token_states[event.token_id]
+                token_state.trade_count += 1
+                event_deltas, event_warnings = self._apply_trade(
+                    market_slug=market.slug,
+                    token_state=token_state,
+                    event=event,
+                    maker_reward_enabled=maker_reward_enabled,
+                )
+            elif event.kind == "SPLIT":
+                up_state = token_states[market.up_token_id]
+                down_state = token_states[market.down_token_id]
+
+                qty_each = event.size / 2.0
+                usdc_each = event.usdc_size / 2.0
+                if qty_each > 0:
+                    up_state.lots.append(_Lot(qty=qty_each, cost_per_qty=usdc_each / qty_each))
+                    down_state.lots.append(_Lot(qty=qty_each, cost_per_qty=usdc_each / qty_each))
+                up_state.split_qty += qty_each
+                down_state.split_qty += qty_each
+            elif event.kind == "REDEEM" and event.token_id in token_states:
+                token_state = token_states[event.token_id]
+                event_deltas, event_warnings = self._close_position(
+                    market_slug=market.slug,
+                    token_state=token_state,
+                    timestamp=event.timestamp,
+                    quantity=event.size,
+                    proceeds=event.usdc_size,
+                    missing_cost_warn_code="REDEEM_OVERSELL_ZERO_COST",
+                )
+                token_state.redeem_qty += event.size
+            pnl_deltas.extend(event_deltas)
+            warnings.extend(event_warnings)
+
+            is_flat = _is_market_flat(token_states)
+            if was_flat and not is_flat and active_session is None:
+                active_session = _SessionAccumulator(market_slug=market.slug, start_timestamp=event.timestamp)
+            active_session = _record_session_event(active_session, event, event_deltas, event_warnings)
+            if active_session is not None and is_flat:
+                session = _finalize_session(active_session, end_timestamp=event.timestamp)
+                trade_sessions.append(session)
+                session_diagnostics.total_detected_sessions += 1
+                session_diagnostics.closed_sessions += 1
+                _apply_session_diagnostic(session_diagnostics, session)
+                active_session = None
+
+        settlement_ts, settlement_deltas, settlement_warnings = self._settle_closed_market_positions(
+            market=market,
+            token_states=token_states,
+            events=events,
+        )
+        pnl_deltas.extend(settlement_deltas)
+        warnings.extend(settlement_warnings)
+        if settlement_ts is not None:
+            settlement_event = _Event(timestamp=settlement_ts, tx="settlement", kind="SETTLEMENT")
+            active_session = _record_session_event(active_session, settlement_event, settlement_deltas, settlement_warnings)
+            if active_session is not None and _is_market_flat(token_states):
+                session = _finalize_session(active_session, end_timestamp=settlement_ts)
+                trade_sessions.append(session)
+                session_diagnostics.total_detected_sessions += 1
+                session_diagnostics.closed_sessions += 1
+                _apply_session_diagnostic(session_diagnostics, session)
+                active_session = None
+
+        if active_session is not None:
+            session_diagnostics.total_detected_sessions += 1
+            session_diagnostics.excluded_open_session_count += 1
+
+        if not maker_reward_enabled and has_maker_trade:
+            warnings.append(
+                WarningItem(
+                    market_slug=market.slug,
+                    code="MAKER_REWARD_DEFERRED_TODAY",
+                    message=(
+                        "maker reward for markets on/after current UTC day 00:00 is excluded "
+                        "because Polymarket settles maker rewards once per day"
+                    ),
+                )
+            )
+
+        token_reports: list[TokenReport] = []
+        for token_state in token_states.values():
+            token_reports.append(
+                TokenReport(
+                    token_id=token_state.token_id,
+                    outcome=token_state.outcome,
+                    realized_pnl_usdc=round(token_state.realized_pnl_usdc, 10),
+                    taker_fee_usdc=round(token_state.taker_fee_usdc, 10),
+                    maker_reward_usdc=round(token_state.maker_reward_usdc, 10),
+                    buy_qty=round(token_state.buy_qty, 10),
+                    sell_qty=round(token_state.sell_qty, 10),
+                    split_qty=round(token_state.split_qty, 10),
+                    redeem_qty=round(token_state.redeem_qty, 10),
+                    ending_position_qty=round(token_state.position_qty, 10),
+                    trade_count=token_state.trade_count,
+                )
+            )
+
+        market_report = MarketReport(
+            market_slug=market.slug,
+            condition_id=market.condition_id,
+            up_token_id=market.up_token_id,
+            down_token_id=market.down_token_id,
+            realized_pnl_usdc=round(sum(t.realized_pnl_usdc for t in token_reports), 10),
+            taker_fee_usdc=round(sum(t.taker_fee_usdc for t in token_reports), 10),
+            maker_reward_usdc=round(sum(t.maker_reward_usdc for t in token_reports), 10),
+            ending_position_up=round(token_states[market.up_token_id].position_qty, 10),
+            ending_position_down=round(token_states[market.down_token_id].position_qty, 10),
+            tokens=sorted(token_reports, key=lambda x: x.token_id),
+        )
+
+        return MarketReplayResult(
+            report=market_report,
+            deltas=pnl_deltas,
+            warnings=warnings,
+            trade_sessions=trade_sessions,
+            session_diagnostics=session_diagnostics,
+        )
+
+    def _build_market_events(
+        self,
+        market: PolymarketMarket,
+        taker_trades: list[TradeRecord],
+        all_trades: list[TradeRecord],
+        split_activities: list[ActivityRecord],
+        redeem_activities: list[ActivityRecord],
+    ) -> tuple[list[_Event], list[WarningItem], bool, bool]:
+        warnings: list[WarningItem] = []
         taker_keys = {_trade_key(t) for t in taker_trades}
         events: list[_Event] = []
         maker_reward_enabled = _is_maker_reward_enabled_for_market(market.slug)
@@ -144,98 +340,7 @@ class ProfitEngine:
                 )
             )
 
-        events.sort(key=lambda e: (e.timestamp, e.tx, _event_priority(e.kind)))
-
-        pnl_deltas: list[PnlDelta] = []
-        for event in events:
-            if event.kind == "TRADE" and event.token_id in token_states:
-                token_state = token_states[event.token_id]
-                token_state.trade_count += 1
-                delta, new_warnings = self._apply_trade(
-                    market_slug=market.slug,
-                    token_state=token_state,
-                    event=event,
-                    maker_reward_enabled=maker_reward_enabled,
-                )
-                pnl_deltas.extend(delta)
-                warnings.extend(new_warnings)
-            elif event.kind == "SPLIT":
-                up_state = token_states[market.up_token_id]
-                down_state = token_states[market.down_token_id]
-
-                qty_each = event.size / 2.0
-                usdc_each = event.usdc_size / 2.0
-                if qty_each > 0:
-                    up_state.lots.append(_Lot(qty=qty_each, cost_per_qty=usdc_each / qty_each))
-                    down_state.lots.append(_Lot(qty=qty_each, cost_per_qty=usdc_each / qty_each))
-                up_state.split_qty += qty_each
-                down_state.split_qty += qty_each
-            elif event.kind == "REDEEM" and event.token_id in token_states:
-                token_state = token_states[event.token_id]
-                delta, new_warnings = self._close_position(
-                    market_slug=market.slug,
-                    token_state=token_state,
-                    timestamp=event.timestamp,
-                    quantity=event.size,
-                    proceeds=event.usdc_size,
-                    missing_cost_warn_code="REDEEM_OVERSELL_ZERO_COST",
-                )
-                token_state.redeem_qty += event.size
-                pnl_deltas.extend(delta)
-                warnings.extend(new_warnings)
-
-        settlement_deltas, settlement_warnings = self._settle_closed_market_positions(
-            market=market,
-            token_states=token_states,
-            events=events,
-        )
-        pnl_deltas.extend(settlement_deltas)
-        warnings.extend(settlement_warnings)
-
-        if not maker_reward_enabled and has_maker_trade:
-            warnings.append(
-                WarningItem(
-                    market_slug=market.slug,
-                    code="MAKER_REWARD_DEFERRED_TODAY",
-                    message=(
-                        "maker reward for markets on/after current UTC day 00:00 is excluded "
-                        "because Polymarket settles maker rewards once per day"
-                    ),
-                )
-            )
-
-        token_reports: list[TokenReport] = []
-        for token_state in token_states.values():
-            token_reports.append(
-                TokenReport(
-                    token_id=token_state.token_id,
-                    outcome=token_state.outcome,
-                    realized_pnl_usdc=round(token_state.realized_pnl_usdc, 10),
-                    taker_fee_usdc=round(token_state.taker_fee_usdc, 10),
-                    maker_reward_usdc=round(token_state.maker_reward_usdc, 10),
-                    buy_qty=round(token_state.buy_qty, 10),
-                    sell_qty=round(token_state.sell_qty, 10),
-                    split_qty=round(token_state.split_qty, 10),
-                    redeem_qty=round(token_state.redeem_qty, 10),
-                    ending_position_qty=round(token_state.position_qty, 10),
-                    trade_count=token_state.trade_count,
-                )
-            )
-
-        market_report = MarketReport(
-            market_slug=market.slug,
-            condition_id=market.condition_id,
-            up_token_id=market.up_token_id,
-            down_token_id=market.down_token_id,
-            realized_pnl_usdc=round(sum(t.realized_pnl_usdc for t in token_reports), 10),
-            taker_fee_usdc=round(sum(t.taker_fee_usdc for t in token_reports), 10),
-            maker_reward_usdc=round(sum(t.maker_reward_usdc for t in token_reports), 10),
-            ending_position_up=round(token_states[market.up_token_id].position_qty, 10),
-            ending_position_down=round(token_states[market.down_token_id].position_qty, 10),
-            tokens=sorted(token_reports, key=lambda x: x.token_id),
-        )
-
-        return market_report, pnl_deltas, warnings
+        return events, warnings, maker_reward_enabled, has_maker_trade
 
     def _apply_trade(
         self,
@@ -297,26 +402,26 @@ class ProfitEngine:
         market: PolymarketMarket,
         token_states: dict[str, _TokenState],
         events: list[_Event],
-    ) -> tuple[list[PnlDelta], list[WarningItem]]:
+    ) -> tuple[int | None, list[PnlDelta], list[WarningItem]]:
         if not market.closed:
-            return [], []
+            return None, [], []
 
         unsettled_states = [state for state in token_states.values() if state.position_qty > 1e-12]
         if not unsettled_states:
-            return [], []
+            return None, [], []
 
         winner_token = _resolve_winner_token(market)
+        settlement_ts = _settlement_timestamp(market, events)
         if not winner_token:
-            return [], [
+            return settlement_ts, [], [
                 WarningItem(
-                    timestamp=_settlement_timestamp(market, events),
+                    timestamp=settlement_ts,
                     market_slug=market.slug,
                     code="CLOSED_MARKET_UNKNOWN_OUTCOME",
                     message="market is closed but winner outcome cannot be uniquely inferred",
                 )
             ]
 
-        settlement_ts = _settlement_timestamp(market, events)
         deltas: list[PnlDelta] = []
         warnings: list[WarningItem] = []
         for token_state in unsettled_states:
@@ -333,7 +438,7 @@ class ProfitEngine:
             deltas.extend(close_deltas)
             warnings.extend(close_warnings)
 
-        return deltas, warnings
+        return settlement_ts, deltas, warnings
 
     def _close_position(
         self,
@@ -458,6 +563,84 @@ def _settlement_timestamp(market: PolymarketMarket, events: list[_Event]) -> int
     market_ts = _market_ts_from_slug(market.slug) or 0
     return max(event_ts, market_ts)
 
+
+
+def _is_market_flat(token_states: dict[str, _TokenState], epsilon: float = 1e-12) -> bool:
+    return all(state.position_qty <= epsilon for state in token_states.values())
+
+
+def _record_session_event(
+    active_session: _SessionAccumulator | None,
+    event: _Event,
+    event_deltas: list[PnlDelta],
+    event_warnings: list[WarningItem],
+) -> _SessionAccumulator | None:
+    if active_session is None:
+        return None
+
+    active_session.event_count += 1
+    active_session.realized_pnl_usdc += sum(delta.delta_pnl_usdc for delta in event_deltas)
+    for warning in event_warnings:
+        active_session.warning_codes.add(warning.code)
+
+    if event.kind == "TRADE" and event.side == "BUY" and event.size > 0:
+        active_session.open_notional_usdc += float(event.size) * float(event.price)
+        active_session.open_qty += float(event.size)
+        if active_session.open_timestamp is None:
+            active_session.open_timestamp = int(event.timestamp)
+
+    return active_session
+
+
+def _finalize_session(active_session: _SessionAccumulator, end_timestamp: int) -> TradeSession:
+    warning_codes = sorted(active_session.warning_codes)
+    open_timestamp = active_session.open_timestamp
+    open_notional = float(active_session.open_notional_usdc)
+    open_qty = float(active_session.open_qty)
+    has_trade_entry = open_timestamp is not None and open_qty > 1e-12
+    open_avg_price = (open_notional / open_qty) if open_qty > 1e-12 else None
+    return_pct = (active_session.realized_pnl_usdc / open_notional) * 100.0 if open_notional > 1e-12 else None
+
+    exclusion_reason = None
+    if not has_trade_entry:
+        exclusion_reason = "no_trade_entry"
+    elif open_notional <= 1e-12:
+        exclusion_reason = "zero_open_notional"
+    elif any(code in SESSION_EXCLUSION_WARNING_CODES for code in warning_codes):
+        exclusion_reason = "warning"
+
+    return TradeSession(
+        market_slug=active_session.market_slug,
+        start_timestamp=int(active_session.start_timestamp),
+        end_timestamp=int(end_timestamp),
+        open_timestamp=int(open_timestamp) if open_timestamp is not None else None,
+        open_hour_utc=(
+            datetime.fromtimestamp(int(open_timestamp), tz=timezone.utc).hour
+            if open_timestamp is not None
+            else None
+        ),
+        open_avg_price=round(open_avg_price, 6) if open_avg_price is not None else None,
+        open_notional_usdc=round(open_notional, 10),
+        open_qty=round(open_qty, 10),
+        realized_pnl_usdc=round(active_session.realized_pnl_usdc, 10),
+        return_on_open_notional_pct=round(return_pct, 6) if return_pct is not None else None,
+        event_count=active_session.event_count,
+        has_trade_entry=has_trade_entry,
+        is_chart_eligible=exclusion_reason is None,
+        exclusion_reason=exclusion_reason,
+        warning_codes=warning_codes,
+    )
+
+
+def _apply_session_diagnostic(diagnostics: SessionAnalyticsDiagnostics, session: TradeSession) -> None:
+    if session.is_chart_eligible:
+        diagnostics.chart_eligible_sessions += 1
+    elif session.exclusion_reason == "no_trade_entry":
+        diagnostics.excluded_no_trade_entry_count += 1
+    elif session.exclusion_reason == "zero_open_notional":
+        diagnostics.excluded_zero_open_notional_count += 1
+    else:
+        diagnostics.excluded_warning_session_count += 1
 
 
 def build_curve(deltas: list[PnlDelta]) -> list[tuple[int, float, float]]:
