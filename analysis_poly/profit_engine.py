@@ -69,6 +69,8 @@ class _SessionAccumulator:
     open_timestamp: int | None = None
     open_notional_usdc: float = 0.0
     open_qty: float = 0.0
+    close_notional_usdc: float = 0.0
+    close_qty: float = 0.0
     realized_pnl_usdc: float = 0.0
     event_count: int = 0
     warning_codes: set[str] = field(default_factory=set)
@@ -201,18 +203,17 @@ class ProfitEngine:
                 _apply_session_diagnostic(session_diagnostics, session)
                 active_session = None
 
-        settlement_ts, settlement_deltas, settlement_warnings = self._settle_closed_market_positions(
+        settlement_event, settlement_deltas, settlement_warnings = self._settle_closed_market_positions(
             market=market,
             token_states=token_states,
             events=events,
         )
         pnl_deltas.extend(settlement_deltas)
         warnings.extend(settlement_warnings)
-        if settlement_ts is not None:
-            settlement_event = _Event(timestamp=settlement_ts, tx="settlement", kind="SETTLEMENT")
+        if settlement_event is not None:
             active_session = _record_session_event(active_session, settlement_event, settlement_deltas, settlement_warnings)
             if active_session is not None and _is_market_flat(token_states):
-                session = _finalize_session(active_session, end_timestamp=settlement_ts)
+                session = _finalize_session(active_session, end_timestamp=settlement_event.timestamp)
                 trade_sessions.append(session)
                 session_diagnostics.total_detected_sessions += 1
                 session_diagnostics.closed_sessions += 1
@@ -402,7 +403,7 @@ class ProfitEngine:
         market: PolymarketMarket,
         token_states: dict[str, _TokenState],
         events: list[_Event],
-    ) -> tuple[int | None, list[PnlDelta], list[WarningItem]]:
+    ) -> tuple[_Event | None, list[PnlDelta], list[WarningItem]]:
         if not market.closed:
             return None, [], []
 
@@ -413,7 +414,7 @@ class ProfitEngine:
         winner_token = _resolve_winner_token(market)
         settlement_ts = _settlement_timestamp(market, events)
         if not winner_token:
-            return settlement_ts, [], [
+            return _Event(timestamp=settlement_ts, tx="settlement", kind="SETTLEMENT"), [], [
                 WarningItem(
                     timestamp=settlement_ts,
                     market_slug=market.slug,
@@ -424,9 +425,13 @@ class ProfitEngine:
 
         deltas: list[PnlDelta] = []
         warnings: list[WarningItem] = []
+        settled_qty = 0.0
+        settled_proceeds = 0.0
         for token_state in unsettled_states:
             quantity = token_state.position_qty
             proceeds = quantity if token_state.token_id == winner_token else 0.0
+            settled_qty += quantity
+            settled_proceeds += proceeds
             close_deltas, close_warnings = self._close_position(
                 market_slug=market.slug,
                 token_state=token_state,
@@ -438,7 +443,17 @@ class ProfitEngine:
             deltas.extend(close_deltas)
             warnings.extend(close_warnings)
 
-        return settlement_ts, deltas, warnings
+        return (
+            _Event(
+                timestamp=settlement_ts,
+                tx="settlement",
+                kind="SETTLEMENT",
+                size=settled_qty,
+                usdc_size=settled_proceeds,
+            ),
+            deltas,
+            warnings,
+        )
 
     def _close_position(
         self,
@@ -588,6 +603,12 @@ def _record_session_event(
         active_session.open_qty += float(event.size)
         if active_session.open_timestamp is None:
             active_session.open_timestamp = int(event.timestamp)
+    elif event.kind == "TRADE" and event.side == "SELL" and event.size > 0:
+        active_session.close_notional_usdc += float(event.size) * float(event.price)
+        active_session.close_qty += float(event.size)
+    elif event.kind in {"REDEEM", "SETTLEMENT"} and event.size > 0:
+        active_session.close_notional_usdc += float(event.usdc_size)
+        active_session.close_qty += float(event.size)
 
     return active_session
 
@@ -597,8 +618,11 @@ def _finalize_session(active_session: _SessionAccumulator, end_timestamp: int) -
     open_timestamp = active_session.open_timestamp
     open_notional = float(active_session.open_notional_usdc)
     open_qty = float(active_session.open_qty)
+    close_notional = float(active_session.close_notional_usdc)
+    close_qty = float(active_session.close_qty)
     has_trade_entry = open_timestamp is not None and open_qty > 1e-12
     open_avg_price = (open_notional / open_qty) if open_qty > 1e-12 else None
+    close_avg_price = (close_notional / close_qty) if close_qty > 1e-12 else None
     return_pct = (active_session.realized_pnl_usdc / open_notional) * 100.0 if open_notional > 1e-12 else None
 
     exclusion_reason = None
@@ -622,6 +646,9 @@ def _finalize_session(active_session: _SessionAccumulator, end_timestamp: int) -
         open_avg_price=round(open_avg_price, 6) if open_avg_price is not None else None,
         open_notional_usdc=round(open_notional, 10),
         open_qty=round(open_qty, 10),
+        close_avg_price=round(close_avg_price, 6) if close_avg_price is not None else None,
+        close_notional_usdc=round(close_notional, 10),
+        close_qty=round(close_qty, 10),
         realized_pnl_usdc=round(active_session.realized_pnl_usdc, 10),
         return_on_open_notional_pct=round(return_pct, 6) if return_pct is not None else None,
         event_count=active_session.event_count,

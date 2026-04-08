@@ -152,6 +152,9 @@ class TradeSession(BaseModel):
     open_avg_price: float | None = None
     open_notional_usdc: float = 0
     open_qty: float = 0
+    close_avg_price: float | None = None
+    close_notional_usdc: float = 0
+    close_qty: float = 0
     realized_pnl_usdc: float = 0
     return_on_open_notional_pct: float | None = None
     event_count: int = 0
@@ -166,6 +169,7 @@ class SessionOpenHourBucket(BaseModel):
     session_count: int = 0
     weighted_return_on_open_notional_pct: float = 0
     average_return_on_open_notional_pct: float = 0
+    win_rate_pct: float = 0
     sum_realized_pnl_usdc: float = 0
     sum_open_notional_usdc: float = 0
 
@@ -177,6 +181,7 @@ class SessionOpenPriceBucket(BaseModel):
     session_count: int = 0
     weighted_return_on_open_notional_pct: float = 0
     average_return_on_open_notional_pct: float = 0
+    win_rate_pct: float = 0
     sum_realized_pnl_usdc: float = 0
     sum_open_notional_usdc: float = 0
 

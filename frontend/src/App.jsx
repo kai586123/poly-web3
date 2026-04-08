@@ -150,6 +150,7 @@ function buildEmptySessionAnalytics() {
       session_count: 0,
       weighted_return_on_open_notional_pct: 0,
       average_return_on_open_notional_pct: 0,
+      win_rate_pct: 0,
       sum_realized_pnl_usdc: 0,
       sum_open_notional_usdc: 0,
     })),

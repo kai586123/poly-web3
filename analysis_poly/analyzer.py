@@ -589,6 +589,7 @@ def _build_session_analytics(
             "sum_pnl": 0.0,
             "sum_notional": 0.0,
             "sum_return": 0.0,
+            "sum_win_score": 0.0,
         }
         for hour in range(24)
     }
@@ -598,6 +599,7 @@ def _build_session_analytics(
             "sum_pnl": 0.0,
             "sum_notional": 0.0,
             "sum_return": 0.0,
+            "sum_win_score": 0.0,
         }
     )
 
@@ -614,12 +616,14 @@ def _build_session_analytics(
         hour_stats["sum_pnl"] += float(session.realized_pnl_usdc)
         hour_stats["sum_notional"] += float(session.open_notional_usdc)
         hour_stats["sum_return"] += float(session.return_on_open_notional_pct)
+        hour_stats["sum_win_score"] += _session_win_score(session)
 
         price_stats = price_acc[_price_bucket_index(float(session.open_avg_price))]
         price_stats["count"] += 1
         price_stats["sum_pnl"] += float(session.realized_pnl_usdc)
         price_stats["sum_notional"] += float(session.open_notional_usdc)
         price_stats["sum_return"] += float(session.return_on_open_notional_pct)
+        price_stats["sum_win_score"] += _session_win_score(session)
 
     hour_buckets = [
         SessionOpenHourBucket(
@@ -631,6 +635,10 @@ def _build_session_analytics(
             ),
             average_return_on_open_notional_pct=round(
                 stats["sum_return"] / stats["count"] if stats["count"] else 0.0,
+                6,
+            ),
+            win_rate_pct=round(
+                (stats["sum_win_score"] / stats["count"]) * 100.0 if stats["count"] else 0.0,
                 6,
             ),
             sum_realized_pnl_usdc=round(stats["sum_pnl"], 10),
@@ -653,6 +661,10 @@ def _build_session_analytics(
                 stats["sum_return"] / stats["count"] if stats["count"] else 0.0,
                 6,
             ),
+            win_rate_pct=round(
+                (stats["sum_win_score"] / stats["count"]) * 100.0 if stats["count"] else 0.0,
+                6,
+            ),
             sum_realized_pnl_usdc=round(stats["sum_pnl"], 10),
             sum_open_notional_usdc=round(stats["sum_notional"], 10),
         )
@@ -672,6 +684,21 @@ def _price_bucket_index(price: float) -> int:
     if clamped >= 1.0:
         return SESSION_PRICE_BIN_COUNT - 1
     return min(SESSION_PRICE_BIN_COUNT - 1, max(0, int(clamped / SESSION_PRICE_BIN_WIDTH)))
+
+
+def _session_win_score(session: TradeSession) -> float:
+    return_pct = session.return_on_open_notional_pct
+    if return_pct is not None and float(return_pct) > 1e-9:
+        return 1.0
+    if (
+        session.open_avg_price is not None
+        and session.close_avg_price is not None
+        and abs(float(session.close_avg_price) - float(session.open_avg_price)) <= 1e-9
+    ):
+        return 0.5
+    if return_pct is not None and float(return_pct) < -1e-9:
+        return 0.0
+    return 0.5
 
 
 def _cumulative_at(by_ts: dict[int, float], ts: int) -> float:

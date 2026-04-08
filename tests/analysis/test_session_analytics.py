@@ -49,7 +49,9 @@ def test_session_detection_keeps_buy_sell_buy_sell_in_single_flat_to_flat_sessio
     assert session.start_timestamp == 1000
     assert session.end_timestamp == 1030
     assert round(session.open_avg_price, 6) == 0.466667
+    assert round(session.close_avg_price, 6) == 0.633333
     assert round(session.open_notional_usdc, 10) == 7.0
+    assert round(session.close_notional_usdc, 10) == 9.5
     assert round(session.realized_pnl_usdc, 10) == 2.5
     assert round(session.return_on_open_notional_pct, 6) == 35.714286
 
@@ -116,6 +118,7 @@ def test_closed_market_settlement_finishes_session_when_inventory_returns_to_fla
     assert len(result.trade_sessions) == 1
     session = result.trade_sessions[0]
     assert session.end_timestamp == 3000
+    assert round(session.close_avg_price, 6) == 1.0
     assert round(session.realized_pnl_usdc, 10) == 6.0
     assert round(session.return_on_open_notional_pct, 6) == 150.0
     assert result.session_diagnostics.chart_eligible_sessions == 1
@@ -148,7 +151,7 @@ def test_unresolved_closed_market_keeps_session_open_and_excludes_it_from_charts
     assert result.session_diagnostics.excluded_open_session_count == 1
 
 
-def test_session_bucket_aggregation_uses_weighted_and_unweighted_returns():
+def test_session_bucket_aggregation_includes_weighted_returns_and_half_win_ties():
     sessions = [
         TradeSession(
             market_slug="btc-updown-5m-1000",
@@ -159,6 +162,9 @@ def test_session_bucket_aggregation_uses_weighted_and_unweighted_returns():
             open_avg_price=0.431,
             open_notional_usdc=1,
             open_qty=2,
+            close_avg_price=0.44,
+            close_notional_usdc=1.2,
+            close_qty=2.7272727273,
             realized_pnl_usdc=1,
             return_on_open_notional_pct=100,
             event_count=2,
@@ -174,17 +180,38 @@ def test_session_bucket_aggregation_uses_weighted_and_unweighted_returns():
             open_avg_price=0.439,
             open_notional_usdc=9,
             open_qty=18,
+            close_avg_price=0.439,
+            close_notional_usdc=9,
+            close_qty=20.5011389522,
             realized_pnl_usdc=0,
             return_on_open_notional_pct=0,
             event_count=2,
             has_trade_entry=True,
             is_chart_eligible=True,
         ),
+        TradeSession(
+            market_slug="btc-updown-5m-1020",
+            start_timestamp=1020,
+            end_timestamp=1030,
+            open_timestamp=1020,
+            open_hour_utc=0,
+            open_avg_price=0.52,
+            open_notional_usdc=5,
+            open_qty=10,
+            close_avg_price=0.48,
+            close_notional_usdc=4.8,
+            close_qty=10,
+            realized_pnl_usdc=0.5,
+            return_on_open_notional_pct=10,
+            event_count=2,
+            has_trade_entry=True,
+            is_chart_eligible=True,
+        ),
     ]
     diagnostics = SessionAnalyticsDiagnostics(
-        total_detected_sessions=2,
-        closed_sessions=2,
-        chart_eligible_sessions=2,
+        total_detected_sessions=3,
+        closed_sessions=3,
+        chart_eligible_sessions=3,
     )
 
     analytics = _build_session_analytics(sessions, diagnostics)
@@ -192,8 +219,10 @@ def test_session_bucket_aggregation_uses_weighted_and_unweighted_returns():
     price_bucket = next(bucket for bucket in analytics.open_price_buckets if bucket.bin_index == 43)
 
     assert round(hour_bucket.weighted_return_on_open_notional_pct, 6) == 10.0
-    assert round(hour_bucket.average_return_on_open_notional_pct, 6) == 50.0
-    assert hour_bucket.session_count == 2
+    assert round(hour_bucket.average_return_on_open_notional_pct, 6) == 36.666667
+    assert round(hour_bucket.win_rate_pct, 6) == 83.333333
+    assert hour_bucket.session_count == 3
     assert round(price_bucket.weighted_return_on_open_notional_pct, 6) == 10.0
     assert round(price_bucket.average_return_on_open_notional_pct, 6) == 50.0
+    assert round(price_bucket.win_rate_pct, 6) == 75.0
     assert price_bucket.session_count == 2
