@@ -49,7 +49,7 @@ class PolymarketAPIClient:
             )
             response.raise_for_status()
             positions = response.json()
-            return [item for item in positions if self._is_positive_percent_pnl(item)]
+            return positions if isinstance(positions, list) else []
         except Exception as exc:
             logger.error(f"Failed to fetch positions from API: {exc}")
             return []
@@ -72,7 +72,7 @@ class PolymarketAPIClient:
             )
             response.raise_for_status()
             positions = response.json()
-            return [item for item in positions if self._is_positive_percent_pnl(item)]
+            return positions if isinstance(positions, list) else []
         except Exception as exc:
             logger.error(f"Failed to fetch positions from API: {exc}")
             return []
@@ -180,13 +180,6 @@ class PolymarketAPIClient:
         if "result" not in result:
             raise Exception("Estimate gas error: " + str(result))
         return str(int(result["result"], 16))
-
-    @staticmethod
-    def _is_positive_percent_pnl(position: dict) -> bool:
-        try:
-            return float(position.get("percentPnl") or 0) > 0
-        except (TypeError, ValueError):
-            return False
 
 
 DEFAULT_POLYMARKET_API_CLIENT = PolymarketAPIClient()
