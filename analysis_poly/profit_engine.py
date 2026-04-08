@@ -71,6 +71,7 @@ class _SessionAccumulator:
     open_qty: float = 0.0
     close_notional_usdc: float = 0.0
     close_qty: float = 0.0
+    peak_position_notional_usdc: float = 0.0
     realized_pnl_usdc: float = 0.0
     event_count: int = 0
     warning_codes: set[str] = field(default_factory=set)
@@ -195,6 +196,10 @@ class ProfitEngine:
             if was_flat and not is_flat and active_session is None:
                 active_session = _SessionAccumulator(market_slug=market.slug, start_timestamp=event.timestamp)
             active_session = _record_session_event(active_session, event, event_deltas, event_warnings)
+            if active_session is not None:
+                inv = _inventory_cost_basis_usdc(token_states)
+                if inv > active_session.peak_position_notional_usdc:
+                    active_session.peak_position_notional_usdc = inv
             if active_session is not None and is_flat:
                 session = _finalize_session(active_session, end_timestamp=event.timestamp)
                 trade_sessions.append(session)
@@ -212,6 +217,10 @@ class ProfitEngine:
         warnings.extend(settlement_warnings)
         if settlement_event is not None:
             active_session = _record_session_event(active_session, settlement_event, settlement_deltas, settlement_warnings)
+            if active_session is not None:
+                inv = _inventory_cost_basis_usdc(token_states)
+                if inv > active_session.peak_position_notional_usdc:
+                    active_session.peak_position_notional_usdc = inv
             if active_session is not None and _is_market_flat(token_states):
                 session = _finalize_session(active_session, end_timestamp=settlement_event.timestamp)
                 trade_sessions.append(session)
@@ -584,6 +593,15 @@ def _is_market_flat(token_states: dict[str, _TokenState], epsilon: float = 1e-12
     return all(state.position_qty <= epsilon for state in token_states.values())
 
 
+def _inventory_cost_basis_usdc(token_states: dict[str, _TokenState]) -> float:
+    """Σ (shares × lot cost / 成交价) for all open lots — peak inventory notional in USDC."""
+    total = 0.0
+    for state in token_states.values():
+        for lot in state.lots:
+            total += float(lot.qty) * float(lot.cost_per_qty)
+    return total
+
+
 def _record_session_event(
     active_session: _SessionAccumulator | None,
     event: _Event,
@@ -649,6 +667,7 @@ def _finalize_session(active_session: _SessionAccumulator, end_timestamp: int) -
         close_avg_price=round(close_avg_price, 6) if close_avg_price is not None else None,
         close_notional_usdc=round(close_notional, 10),
         close_qty=round(close_qty, 10),
+        peak_position_notional_usdc=round(float(active_session.peak_position_notional_usdc), 10),
         realized_pnl_usdc=round(active_session.realized_pnl_usdc, 10),
         return_on_open_notional_pct=round(return_pct, 6) if return_pct is not None else None,
         event_count=active_session.event_count,

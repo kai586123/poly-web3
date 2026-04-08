@@ -155,6 +155,7 @@ class TradeSession(BaseModel):
     close_avg_price: float | None = None
     close_notional_usdc: float = 0
     close_qty: float = 0
+    peak_position_notional_usdc: float = 0
     realized_pnl_usdc: float = 0
     return_on_open_notional_pct: float | None = None
     event_count: int = 0
@@ -186,6 +187,19 @@ class SessionOpenPriceBucket(BaseModel):
     sum_open_notional_usdc: float = 0
 
 
+class SessionPeakNotionalBucket(BaseModel):
+    bin_index: int
+    bin_start_usdc: float
+    bin_end_usdc: float
+    session_count: int = 0
+    weighted_return_on_open_notional_pct: float = 0
+    average_return_on_open_notional_pct: float = 0
+    win_rate_pct: float = 0
+    sum_realized_pnl_usdc: float = 0
+    sum_open_notional_usdc: float = 0
+    sum_peak_position_notional_usdc: float = 0
+
+
 class SessionAnalyticsDiagnostics(BaseModel):
     total_detected_sessions: int = 0
     closed_sessions: int = 0
@@ -203,6 +217,7 @@ class SessionAnalytics(BaseModel):
         default_factory=lambda: [SessionOpenHourBucket(hour_utc=hour) for hour in range(24)]
     )
     open_price_buckets: list[SessionOpenPriceBucket] = Field(default_factory=list)
+    open_peak_notional_buckets: list[SessionPeakNotionalBucket] = Field(default_factory=list)
 
 
 class AnalysisReport(BaseModel):

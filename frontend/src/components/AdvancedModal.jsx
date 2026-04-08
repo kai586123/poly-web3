@@ -1,4 +1,4 @@
-import { Button, Col, Form, Input, Modal, Row } from "antd";
+import { Button, Col, Form, Input, InputNumber, Modal, Row } from "antd";
 
 export default function AdvancedModal({ open, onClose, formData, updateField }) {
   return (
@@ -37,6 +37,21 @@ export default function AdvancedModal({ open, onClose, formData, updateField }) 
           <Col xs={24} md={12}>
             <Form.Item label="Page Limit">
               <Input value={formData.pageLimit} onChange={(event) => updateField("pageLimit", event.target.value)} />
+            </Form.Item>
+          </Col>
+          <Col xs={24}>
+            <Form.Item
+              label="Peak notional axis cap (USDC)"
+              extra="Session analytics: 0–cap split into 20 equal buckets for peak-position charts. Leave empty to use the max peak in your data."
+            >
+              <InputNumber
+                min={0}
+                step={10}
+                placeholder="Empty = use data max"
+                style={{ width: "100%", maxWidth: 280 }}
+                value={formData.peakNotionalCapUsdc === "" ? undefined : Number(formData.peakNotionalCapUsdc)}
+                onChange={(value) => updateField("peakNotionalCapUsdc", value === null || value === undefined ? "" : String(value))}
+              />
             </Form.Item>
           </Col>
         </Row>

@@ -50,6 +50,7 @@ def test_session_detection_keeps_buy_sell_buy_sell_in_single_flat_to_flat_sessio
     assert session.end_timestamp == 1030
     assert round(session.open_avg_price, 6) == 0.466667
     assert round(session.close_avg_price, 6) == 0.633333
+    assert session.peak_position_notional_usdc > 0
     assert round(session.open_notional_usdc, 10) == 7.0
     assert round(session.close_notional_usdc, 10) == 9.5
     assert round(session.realized_pnl_usdc, 10) == 2.5
@@ -165,6 +166,7 @@ def test_session_bucket_aggregation_includes_weighted_returns_and_half_win_ties(
             close_avg_price=0.44,
             close_notional_usdc=1.2,
             close_qty=2.7272727273,
+            peak_position_notional_usdc=15,
             realized_pnl_usdc=1,
             return_on_open_notional_pct=100,
             event_count=2,
@@ -183,6 +185,7 @@ def test_session_bucket_aggregation_includes_weighted_returns_and_half_win_ties(
             close_avg_price=0.439,
             close_notional_usdc=9,
             close_qty=20.5011389522,
+            peak_position_notional_usdc=15,
             realized_pnl_usdc=0,
             return_on_open_notional_pct=0,
             event_count=2,
@@ -201,6 +204,7 @@ def test_session_bucket_aggregation_includes_weighted_returns_and_half_win_ties(
             close_avg_price=0.48,
             close_notional_usdc=4.8,
             close_qty=10,
+            peak_position_notional_usdc=15,
             realized_pnl_usdc=0.5,
             return_on_open_notional_pct=10,
             event_count=2,
@@ -217,6 +221,7 @@ def test_session_bucket_aggregation_includes_weighted_returns_and_half_win_ties(
     analytics = _build_session_analytics(sessions, diagnostics)
     hour_bucket = analytics.open_hour_buckets[0]
     price_bucket = next(bucket for bucket in analytics.open_price_buckets if bucket.bin_index == 43)
+    peak_bucket = next(bucket for bucket in analytics.open_peak_notional_buckets if bucket.bin_index == 1)
 
     assert round(hour_bucket.weighted_return_on_open_notional_pct, 6) == 10.0
     assert round(hour_bucket.average_return_on_open_notional_pct, 6) == 36.666667
@@ -226,3 +231,6 @@ def test_session_bucket_aggregation_includes_weighted_returns_and_half_win_ties(
     assert round(price_bucket.average_return_on_open_notional_pct, 6) == 50.0
     assert round(price_bucket.win_rate_pct, 6) == 75.0
     assert price_bucket.session_count == 2
+    assert peak_bucket.session_count == 3
+    assert round(peak_bucket.sum_peak_position_notional_usdc, 6) == 45.0
+    assert round(peak_bucket.weighted_return_on_open_notional_pct, 6) == 10.0

@@ -24,6 +24,7 @@ from .models import (
     SessionAnalyticsDiagnostics,
     SessionOpenHourBucket,
     SessionOpenPriceBucket,
+    SessionPeakNotionalBucket,
     SummaryStats,
     TradeSession,
     TradeRecord,
@@ -38,6 +39,8 @@ MARKET_TIMESTAMP_CHUNK_SIZE_DEFAULT = 20
 MARKET_RESULT_CACHE_RECENT_WINDOW_SEC = 30 * 60
 SESSION_PRICE_BIN_WIDTH = 0.01
 SESSION_PRICE_BIN_COUNT = 100
+SESSION_PEAK_NOTIONAL_BIN_WIDTH = 10.0
+SESSION_PEAK_NOTIONAL_BIN_COUNT = 200
 
 
 @dataclass
@@ -602,6 +605,16 @@ def _build_session_analytics(
             "sum_win_score": 0.0,
         }
     )
+    peak_acc: dict[int, dict[str, float]] = defaultdict(
+        lambda: {
+            "count": 0,
+            "sum_pnl": 0.0,
+            "sum_notional": 0.0,
+            "sum_return": 0.0,
+            "sum_win_score": 0.0,
+            "sum_peak": 0.0,
+        }
+    )
 
     for session in ordered_sessions:
         if (
@@ -624,6 +637,14 @@ def _build_session_analytics(
         price_stats["sum_notional"] += float(session.open_notional_usdc)
         price_stats["sum_return"] += float(session.return_on_open_notional_pct)
         price_stats["sum_win_score"] += _session_win_score(session)
+
+        peak_stats = peak_acc[_peak_notional_bucket_index(float(session.peak_position_notional_usdc))]
+        peak_stats["count"] += 1
+        peak_stats["sum_pnl"] += float(session.realized_pnl_usdc)
+        peak_stats["sum_notional"] += float(session.open_notional_usdc)
+        peak_stats["sum_return"] += float(session.return_on_open_notional_pct)
+        peak_stats["sum_win_score"] += _session_win_score(session)
+        peak_stats["sum_peak"] += float(session.peak_position_notional_usdc)
 
     hour_buckets = [
         SessionOpenHourBucket(
@@ -671,11 +692,37 @@ def _build_session_analytics(
         for idx, stats in sorted(price_acc.items())
     ]
 
+    peak_buckets = [
+        SessionPeakNotionalBucket(
+            bin_index=idx,
+            bin_start_usdc=round(idx * SESSION_PEAK_NOTIONAL_BIN_WIDTH, 2),
+            bin_end_usdc=round((idx + 1) * SESSION_PEAK_NOTIONAL_BIN_WIDTH, 2),
+            session_count=int(stats["count"]),
+            weighted_return_on_open_notional_pct=round(
+                (stats["sum_pnl"] / stats["sum_notional"]) * 100.0 if stats["sum_notional"] > 1e-12 else 0.0,
+                6,
+            ),
+            average_return_on_open_notional_pct=round(
+                stats["sum_return"] / stats["count"] if stats["count"] else 0.0,
+                6,
+            ),
+            win_rate_pct=round(
+                (stats["sum_win_score"] / stats["count"]) * 100.0 if stats["count"] else 0.0,
+                6,
+            ),
+            sum_realized_pnl_usdc=round(stats["sum_pnl"], 10),
+            sum_open_notional_usdc=round(stats["sum_notional"], 10),
+            sum_peak_position_notional_usdc=round(stats["sum_peak"], 10),
+        )
+        for idx, stats in sorted(peak_acc.items())
+    ]
+
     return SessionAnalytics(
         diagnostics=diagnostics,
         trade_sessions=ordered_sessions,
         open_hour_buckets=hour_buckets,
         open_price_buckets=price_buckets,
+        open_peak_notional_buckets=peak_buckets,
     )
 
 
@@ -684,6 +731,15 @@ def _price_bucket_index(price: float) -> int:
     if clamped >= 1.0:
         return SESSION_PRICE_BIN_COUNT - 1
     return min(SESSION_PRICE_BIN_COUNT - 1, max(0, int(clamped / SESSION_PRICE_BIN_WIDTH)))
+
+
+def _peak_notional_bucket_index(peak_usdc: float) -> int:
+    p = max(0.0, float(peak_usdc))
+    width = SESSION_PEAK_NOTIONAL_BIN_WIDTH
+    raw = int(p // width)
+    if raw >= SESSION_PEAK_NOTIONAL_BIN_COUNT:
+        return SESSION_PEAK_NOTIONAL_BIN_COUNT - 1
+    return min(SESSION_PEAK_NOTIONAL_BIN_COUNT - 1, max(0, raw))
 
 
 def _session_win_score(session: TradeSession) -> float:

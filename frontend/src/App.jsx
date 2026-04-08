@@ -155,6 +155,7 @@ function buildEmptySessionAnalytics() {
       sum_open_notional_usdc: 0,
     })),
     open_price_buckets: [],
+    open_peak_notional_buckets: [],
   };
 }
 
@@ -179,6 +180,7 @@ function normalizeSessionAnalytics(raw) {
     trade_sessions: Array.isArray(raw.trade_sessions) ? raw.trade_sessions : [],
     open_hour_buckets: openHourBuckets,
     open_price_buckets: Array.isArray(raw.open_price_buckets) ? raw.open_price_buckets : [],
+    open_peak_notional_buckets: Array.isArray(raw.open_peak_notional_buckets) ? raw.open_peak_notional_buckets : [],
   };
 }
 
@@ -669,9 +671,9 @@ export default function App({ serverDefaults }) {
           drawdownMarkers={drawdownMarkers}
         />
 
-        <InsightCharts sessionAnalytics={sessionAnalytics} />
-
         <QuantMetricsPanel totalSeries={totalSeries} totalSeriesNoFee={totalSeriesNoFee} markets={markets} />
+
+        <InsightCharts sessionAnalytics={sessionAnalytics} peakNotionalCapUsdc={formData.peakNotionalCapUsdc} />
 
         <MarketTable markets={markets} />
       </div>

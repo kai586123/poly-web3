@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .storage_paths import default_market_result_cache_dir
 
-RESULT_CACHE_SCHEMA_VERSION = 3
+RESULT_CACHE_SCHEMA_VERSION = 4
 
 
 class AddressMarketResultCache:

@@ -21,5 +21,6 @@ export function buildDefaultForm(serverDefaults) {
     makerRewardRatio: "0.2",
     concurrency: "5",
     pageLimit: "1000",
+    peakNotionalCapUsdc: "",
   };
 }

@@ -36,16 +36,146 @@ function formatBucketLabel(row) {
   return `[${start.toFixed(2)}, ${end.toFixed(2)}${close}`;
 }
 
+const PEAK_DISPLAY_BIN_COUNT = 20;
+
+function sessionWinScore(s) {
+  const ret = s.return_on_open_notional_pct;
+  if (ret != null && Number(ret) > 1e-9) {
+    return 1;
+  }
+  if (
+    s.open_avg_price != null &&
+    s.close_avg_price != null &&
+    Math.abs(Number(s.close_avg_price) - Number(s.open_avg_price)) <= 1e-9
+  ) {
+    return 0.5;
+  }
+  if (ret != null && Number(ret) < -1e-9) {
+    return 0;
+  }
+  return 0.5;
+}
+
+function buildPeakDisplayBuckets(tradeSessions, capInput) {
+  const list = Array.isArray(tradeSessions) ? tradeSessions : [];
+  const eligible = list.filter(
+    (s) =>
+      s.is_chart_eligible &&
+      s.open_hour_utc != null &&
+      s.open_avg_price != null &&
+      s.return_on_open_notional_pct != null,
+  );
+  if (eligible.length === 0) {
+    return { rows: [], axisUpper: 0, usedDataMax: 0, usedUserCap: null };
+  }
+
+  const peaks = eligible.map((s) => Math.max(0, Number(s.peak_position_notional_usdc || 0)));
+  const dataMax = Math.max(...peaks, 1e-12);
+
+  let userCap = null;
+  if (capInput !== null && capInput !== undefined && capInput !== "") {
+    const n = typeof capInput === "number" ? capInput : Number(String(capInput).trim());
+    if (Number.isFinite(n) && n > 0) {
+      userCap = n;
+    }
+  }
+
+  const axisMax = userCap != null ? userCap : dataMax;
+  const width = axisMax / PEAK_DISPLAY_BIN_COUNT;
+
+  const acc = Array.from({ length: PEAK_DISPLAY_BIN_COUNT }, (_, i) => ({
+    bin_index: i,
+    bin_start_usdc: i * width,
+    bin_end_usdc: (i + 1) * width,
+    session_count: 0,
+    sum_pnl: 0,
+    sum_notional: 0,
+    sum_return: 0,
+    sum_win_score: 0,
+    sum_peak: 0,
+    last_bin_has_overflow: false,
+  }));
+
+  for (const s of eligible) {
+    const peak = Math.max(0, Number(s.peak_position_notional_usdc || 0));
+    let idx;
+    if (userCap != null && peak > axisMax + 1e-9) {
+      idx = PEAK_DISPLAY_BIN_COUNT - 1;
+      acc[idx].last_bin_has_overflow = true;
+    } else if (peak >= axisMax - 1e-12) {
+      idx = PEAK_DISPLAY_BIN_COUNT - 1;
+    } else {
+      idx = Math.min(PEAK_DISPLAY_BIN_COUNT - 1, Math.floor(peak / width));
+    }
+
+    const b = acc[idx];
+    b.session_count += 1;
+    b.sum_pnl += Number(s.realized_pnl_usdc || 0);
+    b.sum_notional += Number(s.open_notional_usdc || 0);
+    b.sum_return += Number(s.return_on_open_notional_pct || 0);
+    b.sum_win_score += sessionWinScore(s);
+    b.sum_peak += peak;
+  }
+
+  const rows = acc
+    .filter((b) => b.session_count > 0)
+    .map((b) => {
+      const wr = b.sum_notional > 1e-12 ? (b.sum_pnl / b.sum_notional) * 100 : 0;
+      const ar = b.session_count ? b.sum_return / b.session_count : 0;
+      const wrate = b.session_count ? (b.sum_win_score / b.session_count) * 100 : 0;
+      return {
+        bin_index: b.bin_index,
+        bin_start_usdc: Math.round(b.bin_start_usdc * 10000) / 10000,
+        bin_end_usdc: Math.round(b.bin_end_usdc * 10000) / 10000,
+        bin_count: PEAK_DISPLAY_BIN_COUNT,
+        session_count: b.session_count,
+        weighted_return_on_open_notional_pct: Math.round(wr * 1e6) / 1e6,
+        average_return_on_open_notional_pct: Math.round(ar * 1e6) / 1e6,
+        win_rate_pct: Math.round(wrate * 1e6) / 1e6,
+        sum_realized_pnl_usdc: b.sum_pnl,
+        sum_open_notional_usdc: b.sum_notional,
+        sum_peak_position_notional_usdc: b.sum_peak,
+        last_bin_has_overflow: b.last_bin_has_overflow,
+      };
+    });
+
+  return {
+    rows,
+    axisUpper: axisMax,
+    usedDataMax: dataMax,
+    usedUserCap: userCap,
+  };
+}
+
+function formatNotionalBucketLabel(row) {
+  const start = Number(row?.bin_start_usdc || 0);
+  const end = Number(row?.bin_end_usdc || 0);
+  const idx = Number(row?.bin_index ?? 0);
+  const totalBins = Number(row?.bin_count ?? PEAK_DISPLAY_BIN_COUNT);
+  if (idx >= totalBins - 1 && row?.last_bin_has_overflow) {
+    return `[${start.toFixed(0)} USDC, +∞)`;
+  }
+  return `[${start.toFixed(0)}, ${end.toFixed(0)}) USDC`;
+}
+
 function formatTooltipDetails(title, row) {
-  return [
-    `<b>${title}</b>`,
+  const lines = [`<b>${title}</b>`];
+  if (
+    row?.sum_peak_position_notional_usdc != null &&
+    Number(row?.session_count || 0) > 0
+  ) {
+    const avgPeak = Number(row.sum_peak_position_notional_usdc) / Number(row.session_count);
+    lines.push(`Avg peak position (cost): <b>${formatUsd(avgPeak)}</b>`);
+  }
+  lines.push(
     `Weighted return: <b>${Number(row?.weighted_return_on_open_notional_pct || 0).toFixed(2)}%</b>`,
     `Win rate: <b>${Number(row?.win_rate_pct || 0).toFixed(2)}%</b>`,
     `Unweighted mean: <b>${Number(row?.average_return_on_open_notional_pct || 0).toFixed(2)}%</b>`,
     `Closed sessions: <b>${Number(row?.session_count || 0)}</b>`,
     `Open notional: <b>${formatUsd(row?.sum_open_notional_usdc)}</b>`,
     `Realized PnL: <b>${formatUsd(row?.sum_realized_pnl_usdc)}</b>`,
-  ].join("<br/>");
+  );
+  return lines.join("<br/>");
 }
 
 function buildPriceAxisRange(rows) {
@@ -66,7 +196,30 @@ function buildPriceAxisRange(rows) {
   };
 }
 
-export default function InsightCharts({ sessionAnalytics }) {
+function buildPeakChartAxisRange(axisUpper) {
+  const u = Number(axisUpper || 0);
+  if (!(u > 0)) {
+    return { min: 0, max: 100, scale: false };
+  }
+  const pad = Math.max(u * 0.04, 1);
+  return {
+    min: 0,
+    max: u + pad,
+    scale: true,
+  };
+}
+
+function parsePeakNotionalCap(value) {
+  if (value === "" || value == null) {
+    return undefined;
+  }
+  const n = Number(typeof value === "string" ? value.trim() : value);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+export default function InsightCharts({ sessionAnalytics, peakNotionalCapUsdc = "" }) {
+  const peakOrderCapUsdc = useMemo(() => parsePeakNotionalCap(peakNotionalCapUsdc), [peakNotionalCapUsdc]);
+
   const diagnostics = sessionAnalytics?.diagnostics || {};
   const hourRows =
     Array.isArray(sessionAnalytics?.open_hour_buckets) && sessionAnalytics.open_hour_buckets.length === 24
@@ -81,6 +234,24 @@ export default function InsightCharts({ sessionAnalytics }) {
           sum_open_notional_usdc: 0,
         }));
   const priceRows = Array.isArray(sessionAnalytics?.open_price_buckets) ? sessionAnalytics.open_price_buckets : [];
+  const {
+    rows: peakRows,
+    axisUpper: peakAxisUpper,
+    usedUserCap: peakUsedCap,
+  } = useMemo(
+    () => buildPeakDisplayBuckets(sessionAnalytics?.trade_sessions, peakOrderCapUsdc),
+    [sessionAnalytics?.trade_sessions, peakOrderCapUsdc],
+  );
+  const peakAxisRange = useMemo(() => buildPeakChartAxisRange(peakAxisUpper), [peakAxisUpper]);
+  const peakChartSubtext = useMemo(() => {
+    if (!(peakAxisUpper > 0)) {
+      return "";
+    }
+    if (peakUsedCap != null) {
+      return `Session peak = Σ(shares×lot cost). X-axis 0–$${peakUsedCap.toFixed(0)} in ${PEAK_DISPLAY_BIN_COUNT} equal buckets (manual cap; larger peaks stack in last bucket).`;
+    }
+    return `Session peak = Σ(shares×lot cost). X-axis 0–$${peakAxisUpper.toFixed(0)} in ${PEAK_DISPLAY_BIN_COUNT} equal buckets (empty cap → use data max).`;
+  }, [peakAxisUpper, peakUsedCap]);
   const eligibleSessionCount = Number(diagnostics.chart_eligible_sessions || 0);
 
   const hourlyOption = useMemo(() => {
@@ -411,6 +582,180 @@ export default function InsightCharts({ sessionAnalytics }) {
     };
   }, [priceAxisRange.max, priceAxisRange.min, priceAxisRange.scale, priceRows]);
 
+  const peakNotionalReturnOption = useMemo(() => {
+    const data = peakRows.map((row) => {
+      const start = Number(row.bin_start_usdc || 0);
+      const end = Number(row.bin_end_usdc || 0);
+      const x = (start + end) / 2;
+      const y = Number(row.weighted_return_on_open_notional_pct || 0);
+      const sessions = Number(row.session_count || 0);
+      return {
+        value: [x, y],
+        symbolSize: Math.max(10, Math.min(34, 10 + Math.sqrt(Math.max(sessions, 0)) * 3.5)),
+        raw: row,
+        itemStyle: {
+          color:
+            y >= 0
+              ? new echarts.graphic.RadialGradient(0.35, 0.35, 0.9, [
+                  { offset: 0, color: "#a7f3d0" },
+                  { offset: 1, color: "#047857" },
+                ])
+              : new echarts.graphic.RadialGradient(0.35, 0.35, 0.9, [
+                  { offset: 0, color: "#fde68a" },
+                  { offset: 1, color: "#b45309" },
+                ]),
+          borderColor: "rgba(255,255,255,0.85)",
+          borderWidth: 1.5,
+          shadowBlur: 6,
+          shadowColor: "rgba(33,48,71,0.12)",
+        },
+      };
+    });
+
+    return {
+      animationDuration: 480,
+      title: {
+        text: "Average Return by Peak Position Notional",
+        subtext: peakChartSubtext || "Set max order size above, or leave empty to use data max; axis is split into 20 equal buckets.",
+        left: 14,
+        top: 6,
+        textStyle: { color: "#213047", fontWeight: 700, fontSize: 17 },
+        subtextStyle: { color: "#617089", fontSize: 11, lineHeight: 14 },
+      },
+      grid: { left: 56, right: 22, top: 80, bottom: 44, containLabel: true },
+      tooltip: {
+        trigger: "item",
+        backgroundColor: "rgba(255,255,255,0.96)",
+        borderColor: "#d5deec",
+        borderWidth: 1,
+        textStyle: { color: "#213047", fontSize: 12 },
+        formatter: (param) => {
+          const row = param?.data?.raw || {};
+          return formatTooltipDetails(formatNotionalBucketLabel(row), row);
+        },
+      },
+      xAxis: {
+        type: "value",
+        min: peakAxisRange.min,
+        max: peakAxisRange.max,
+        scale: peakAxisRange.scale,
+        name: "Peak position (USDC) bucket center",
+        nameLocation: "middle",
+        nameGap: 28,
+        nameTextStyle: { color: "#617089", fontSize: 11 },
+        axisLabel: { color: "#617089", formatter: (v) => `$${Number(v).toFixed(0)}` },
+        splitLine: { lineStyle: { color: "rgba(146,160,181,0.18)" } },
+      },
+      yAxis: {
+        type: "value",
+        name: "Weighted return %",
+        nameTextStyle: { color: "#617089", fontSize: 11 },
+        axisLabel: { color: "#617089", formatter: (v) => `${Number(v).toFixed(1)}%` },
+        splitLine: { lineStyle: { color: "rgba(146,160,181,0.18)" } },
+      },
+      series: [
+        {
+          name: "Peak notional buckets",
+          type: "scatter",
+          data,
+          symbol: "circle",
+          large: data.length > 120,
+          largeThreshold: 120,
+          emphasis: {
+            scale: 1.08,
+            itemStyle: { shadowBlur: 14, shadowColor: "rgba(4,120,87,0.25)" },
+          },
+        },
+      ],
+    };
+  }, [peakAxisRange.max, peakAxisRange.min, peakAxisRange.scale, peakChartSubtext, peakRows]);
+
+  const peakNotionalWinRateOption = useMemo(() => {
+    const data = peakRows.map((row) => {
+      const start = Number(row.bin_start_usdc || 0);
+      const end = Number(row.bin_end_usdc || 0);
+      const x = (start + end) / 2;
+      const y = Number(row.win_rate_pct || 0);
+      const sessions = Number(row.session_count || 0);
+      return {
+        value: [x, y],
+        symbolSize: Math.max(10, Math.min(34, 10 + Math.sqrt(Math.max(sessions, 0)) * 3.5)),
+        raw: row,
+        itemStyle: {
+          color: new echarts.graphic.RadialGradient(0.35, 0.35, 0.9, [
+            { offset: 0, color: "#c4b5fd" },
+            { offset: 1, color: "#5b21b6" },
+          ]),
+          borderColor: "rgba(255,255,255,0.85)",
+          borderWidth: 1.5,
+          shadowBlur: 6,
+          shadowColor: "rgba(33,48,71,0.12)",
+        },
+      };
+    });
+
+    return {
+      animationDuration: 480,
+      title: {
+        text: "Win Rate by Peak Position Notional",
+        subtext: peakChartSubtext
+          ? `${peakChartSubtext} Win rate uses the same session rules as other charts.`
+          : "Same buckets as the return scatter; win rate uses the same session rules as other charts.",
+        left: 14,
+        top: 6,
+        textStyle: { color: "#213047", fontWeight: 700, fontSize: 17 },
+        subtextStyle: { color: "#617089", fontSize: 11, lineHeight: 14 },
+      },
+      grid: { left: 56, right: 22, top: 72, bottom: 44, containLabel: true },
+      tooltip: {
+        trigger: "item",
+        backgroundColor: "rgba(255,255,255,0.96)",
+        borderColor: "#d5deec",
+        borderWidth: 1,
+        textStyle: { color: "#213047", fontSize: 12 },
+        formatter: (param) => {
+          const row = param?.data?.raw || {};
+          return formatTooltipDetails(formatNotionalBucketLabel(row), row);
+        },
+      },
+      xAxis: {
+        type: "value",
+        min: peakAxisRange.min,
+        max: peakAxisRange.max,
+        scale: peakAxisRange.scale,
+        name: "Peak position (USDC) bucket center",
+        nameLocation: "middle",
+        nameGap: 28,
+        nameTextStyle: { color: "#617089", fontSize: 11 },
+        axisLabel: { color: "#617089", formatter: (v) => `$${Number(v).toFixed(0)}` },
+        splitLine: { lineStyle: { color: "rgba(146,160,181,0.18)" } },
+      },
+      yAxis: {
+        type: "value",
+        min: 0,
+        max: 100,
+        name: "Win rate %",
+        nameTextStyle: { color: "#617089", fontSize: 11 },
+        axisLabel: { color: "#617089", formatter: (v) => `${Number(v).toFixed(0)}%` },
+        splitLine: { lineStyle: { color: "rgba(146,160,181,0.18)" } },
+      },
+      series: [
+        {
+          name: "Peak notional win rate",
+          type: "scatter",
+          data,
+          symbol: "circle",
+          large: data.length > 120,
+          largeThreshold: 120,
+          emphasis: {
+            scale: 1.08,
+            itemStyle: { shadowBlur: 14, shadowColor: "rgba(91,33,182,0.25)" },
+          },
+        },
+      ],
+    };
+  }, [peakAxisRange.max, peakAxisRange.min, peakAxisRange.scale, peakChartSubtext, peakRows]);
+
   const diagnosticsText = [
     `Eligible sessions: ${eligibleSessionCount}`,
     `Closed: ${Number(diagnostics.closed_sessions || 0)}`,
@@ -420,7 +765,7 @@ export default function InsightCharts({ sessionAnalytics }) {
   ].join(" · ");
 
   return (
-    <Card className="chart-card insight-charts-card" bodyStyle={{ padding: 12 }}>
+    <Card className="chart-card insight-charts-card" bodyStyle={{ padding: 12 }} title="Session analytics">
       <Row gutter={[12, 12]} align="stretch">
         <Col xs={24} lg={12}>
           <div className="chart-wrap chart-wrap-insights">
@@ -463,6 +808,31 @@ export default function InsightCharts({ sessionAnalytics }) {
               </div>
             ) : (
               <ReactECharts option={priceWinRateOption} notMerge lazyUpdate style={{ height: "100%", width: "100%" }} />
+            )}
+          </div>
+        </Col>
+        <Col xs={24} lg={12}>
+          <div className="chart-wrap chart-wrap-insights chart-wrap-scatter">
+            {eligibleSessionCount <= 0 || peakRows.length <= 0 ? (
+              <div className="insight-empty-hint">
+                <Text type="secondary">
+                  Peak position notional buckets appear after closed sessions; max cost = Σ (shares × lot price) during the
+                  session.
+                </Text>
+              </div>
+            ) : (
+              <ReactECharts option={peakNotionalReturnOption} notMerge lazyUpdate style={{ height: "100%", width: "100%" }} />
+            )}
+          </div>
+        </Col>
+        <Col xs={24} lg={12}>
+          <div className="chart-wrap chart-wrap-insights chart-wrap-scatter">
+            {eligibleSessionCount <= 0 || peakRows.length <= 0 ? (
+              <div className="insight-empty-hint">
+                <Text type="secondary">Win rate by peak position notional uses the same buckets as the return scatter.</Text>
+              </div>
+            ) : (
+              <ReactECharts option={peakNotionalWinRateOption} notMerge lazyUpdate style={{ height: "100%", width: "100%" }} />
             )}
           </div>
         </Col>
