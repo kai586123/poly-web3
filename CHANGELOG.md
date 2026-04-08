@@ -1,8 +1,12 @@
 # Changelog
 
+## 1.2.1
+
+- README: move optional pip uninstall instructions to section 一; renumber following sections.
+
 ## 1.2.0
 
-- Add `requirements.txt` and `requirements-dev.txt`; document running from a clone with `PYTHONPATH` (third-party deps only—no default `pip install -e .` for this repo).
+- Add `requirements.txt` and `requirements-dev.txt`; document running from a clone (third-party deps only—no default `pip install -e .` for this repo).
 - Add `scripts/analysis-poly` and `scripts/analysis-poly-open` wrappers for the analyzer CLI.
 - Analyzer cache/report defaults: stable paths when running from a source checkout (`analysis_poly/storage_paths.py`); tests updated.
 
