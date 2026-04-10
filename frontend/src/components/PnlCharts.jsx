@@ -115,7 +115,30 @@ function marketPrefixColor(prefix) {
   return symbolColor(key);
 }
 
-export default function PnlCharts({ totalSeries, totalSeriesNoFee, symbolSeries, symbolSeriesNoFee, drawdownMarkers }) {
+const SIDE_META = {
+  YES: {
+    netName: "YES-side Net",
+    noFeeName: "YES-side No-Fee",
+    netColor: "#14b8a6",
+    noFeeColor: "#67e8f9",
+  },
+  NO: {
+    netName: "NO-side Net",
+    noFeeName: "NO-side No-Fee",
+    netColor: "#f97316",
+    noFeeColor: "#fdba74",
+  },
+};
+
+export default function PnlCharts({
+  totalSeries,
+  totalSeriesNoFee,
+  symbolSeries,
+  symbolSeriesNoFee,
+  sideSeries,
+  sideSeriesNoFee,
+  drawdownMarkers,
+}) {
   const [viewMode, setViewMode] = useState("net");
   const [showDrawdownMarks, setShowDrawdownMarks] = useState(false);
 
@@ -125,7 +148,18 @@ export default function PnlCharts({ totalSeries, totalSeriesNoFee, symbolSeries,
   const totalOption = useMemo(() => {
     const netMap = seriesMap(totalSeries);
     const noFeeMap = seriesMap(totalSeriesNoFee);
-    const xData = unionSortedTimestamps(showNet ? netMap : new Map(), showNoFee ? noFeeMap : new Map());
+    const yesNetMap = seriesMap(sideSeries?.YES || []);
+    const noNetSideMap = seriesMap(sideSeries?.NO || []);
+    const yesNoFeeMap = seriesMap(sideSeriesNoFee?.YES || []);
+    const noNoFeeSideMap = seriesMap(sideSeriesNoFee?.NO || []);
+    const xData = unionSortedTimestamps(
+      showNet ? netMap : new Map(),
+      showNoFee ? noFeeMap : new Map(),
+      showNet ? yesNetMap : new Map(),
+      showNet ? noNetSideMap : new Map(),
+      showNoFee ? yesNoFeeMap : new Map(),
+      showNoFee ? noNoFeeSideMap : new Map(),
+    );
 
     const series = [];
     const drawdownByTs = new Map();
@@ -229,6 +263,82 @@ export default function PnlCharts({ totalSeries, totalSeriesNoFee, symbolSeries,
       });
     }
 
+    if (showNet) {
+      series.push({
+        name: SIDE_META.YES.netName,
+        type: "line",
+        color: SIDE_META.YES.netColor,
+        smooth: 0.26,
+        smoothMonotone: "x",
+        showSymbol: false,
+        connectNulls: true,
+        lineStyle: {
+          width: 2.2,
+          color: SIDE_META.YES.netColor,
+          opacity: 0.95,
+          cap: "round",
+          join: "round",
+        },
+        data: alignedSeriesData(yesNetMap, xData),
+      });
+      series.push({
+        name: SIDE_META.NO.netName,
+        type: "line",
+        color: SIDE_META.NO.netColor,
+        smooth: 0.26,
+        smoothMonotone: "x",
+        showSymbol: false,
+        connectNulls: true,
+        lineStyle: {
+          width: 2.2,
+          color: SIDE_META.NO.netColor,
+          opacity: 0.95,
+          cap: "round",
+          join: "round",
+        },
+        data: alignedSeriesData(noNetSideMap, xData),
+      });
+    }
+
+    if (showNoFee) {
+      series.push({
+        name: SIDE_META.YES.noFeeName,
+        type: "line",
+        color: SIDE_META.YES.noFeeColor,
+        smooth: 0.26,
+        smoothMonotone: "x",
+        showSymbol: false,
+        connectNulls: true,
+        lineStyle: {
+          width: 1.9,
+          color: SIDE_META.YES.noFeeColor,
+          type: "dotted",
+          opacity: 0.95,
+          cap: "round",
+          join: "round",
+        },
+        data: alignedSeriesData(yesNoFeeMap, xData),
+      });
+      series.push({
+        name: SIDE_META.NO.noFeeName,
+        type: "line",
+        color: SIDE_META.NO.noFeeColor,
+        smooth: 0.26,
+        smoothMonotone: "x",
+        showSymbol: false,
+        connectNulls: true,
+        lineStyle: {
+          width: 1.9,
+          color: SIDE_META.NO.noFeeColor,
+          type: "dotted",
+          opacity: 0.95,
+          cap: "round",
+          join: "round",
+        },
+        data: alignedSeriesData(noNoFeeSideMap, xData),
+      });
+    }
+
     return {
       animation: false,
       title: {
@@ -288,7 +398,16 @@ export default function PnlCharts({ totalSeries, totalSeriesNoFee, symbolSeries,
       },
       series,
     };
-  }, [totalSeries, totalSeriesNoFee, showNet, showNoFee, showDrawdownMarks, drawdownMarkers]);
+  }, [
+    totalSeries,
+    totalSeriesNoFee,
+    sideSeries,
+    sideSeriesNoFee,
+    showNet,
+    showNoFee,
+    showDrawdownMarks,
+    drawdownMarkers,
+  ]);
 
   const symbolOption = useMemo(() => {
     const symbolSet = new Set();

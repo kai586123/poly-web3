@@ -100,7 +100,8 @@ class CurvePoint(BaseModel):
 
 class TokenReport(BaseModel):
     token_id: str
-    outcome: Literal["Up", "Down"]
+    side: Literal["YES", "NO"]
+    outcome: str
     realized_pnl_usdc: float = 0
     taker_fee_usdc: float = 0
     maker_reward_usdc: float = 0
@@ -117,6 +118,8 @@ class MarketReport(BaseModel):
     condition_id: str
     up_token_id: str
     down_token_id: str
+    yes_outcome_label: str = "Yes"
+    no_outcome_label: str = "No"
     realized_pnl_usdc: float = 0
     taker_fee_usdc: float = 0
     maker_reward_usdc: float = 0
@@ -147,6 +150,8 @@ class TradeSession(BaseModel):
     market_slug: str
     start_timestamp: int
     end_timestamp: int
+    entry_side: Literal["YES", "NO"] | None = None
+    entry_outcome: str | None = None
     open_timestamp: int | None = None
     open_hour_utc: int | None = None
     open_avg_price: float | None = None
@@ -226,8 +231,10 @@ class AnalysisReport(BaseModel):
     markets: list[MarketReport]
     total_curve: list[CurvePoint]
     market_curves: dict[str, list[CurvePoint]]
+    side_curves: dict[Literal["YES", "NO"], list[CurvePoint]] = Field(default_factory=dict)
     total_curve_no_fee: list[CurvePoint] = Field(default_factory=list)
     market_curves_no_fee: dict[str, list[CurvePoint]] = Field(default_factory=dict)
+    side_curves_no_fee: dict[Literal["YES", "NO"], list[CurvePoint]] = Field(default_factory=dict)
     warnings: list[WarningItem]
     is_partial: bool = False
     artifacts: dict[str, str] = Field(default_factory=dict)
@@ -237,6 +244,7 @@ class AnalysisReport(BaseModel):
     )
     market_scatter: list[MarketScatterPoint] = Field(default_factory=list)
     session_analytics: SessionAnalytics = Field(default_factory=SessionAnalytics)
+    session_analytics_by_side: dict[Literal["YES", "NO"], SessionAnalytics] = Field(default_factory=dict)
 
 
 class PolymarketMarket(BaseModel):

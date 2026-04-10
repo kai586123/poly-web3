@@ -1,9 +1,9 @@
 import { useMemo } from "react";
 import * as echarts from "echarts";
 import ReactECharts from "echarts-for-react";
-import { Card, Col, Row, Typography } from "antd";
+import { Card, Col, Divider, Row, Typography } from "antd";
 
-const { Text } = Typography;
+const { Text, Title } = Typography;
 
 function barGradient(positive) {
   if (positive) {
@@ -217,7 +217,7 @@ function parsePeakNotionalCap(value) {
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
-export default function InsightCharts({ sessionAnalytics, peakNotionalCapUsdc = "" }) {
+function SessionAnalyticsSection({ sectionLabel = "ALL", sessionAnalytics, peakNotionalCapUsdc = "" }) {
   const peakOrderCapUsdc = useMemo(() => parsePeakNotionalCap(peakNotionalCapUsdc), [peakNotionalCapUsdc]);
 
   const diagnostics = sessionAnalytics?.diagnostics || {};
@@ -765,7 +765,12 @@ export default function InsightCharts({ sessionAnalytics, peakNotionalCapUsdc = 
   ].join(" · ");
 
   return (
-    <Card className="chart-card insight-charts-card" bodyStyle={{ padding: 12 }} title="Session analytics">
+    <>
+      <div style={{ padding: "4px 6px 10px" }}>
+        <Title level={5} style={{ margin: 0 }}>
+          {sectionLabel}
+        </Title>
+      </div>
       <Row gutter={[12, 12]} align="stretch">
         <Col xs={24} lg={12}>
           <div className="chart-wrap chart-wrap-insights">
@@ -840,6 +845,26 @@ export default function InsightCharts({ sessionAnalytics, peakNotionalCapUsdc = 
       <div style={{ padding: "8px 6px 2px" }}>
         <Text type="secondary">{diagnosticsText}</Text>
       </div>
+    </>
+  );
+}
+
+export default function InsightCharts({ sessionAnalytics, sessionAnalyticsBySide = {}, peakNotionalCapUsdc = "" }) {
+  return (
+    <Card className="chart-card insight-charts-card" bodyStyle={{ padding: 12 }} title="Session analytics">
+      <SessionAnalyticsSection sectionLabel="ALL" sessionAnalytics={sessionAnalytics} peakNotionalCapUsdc={peakNotionalCapUsdc} />
+      <Divider style={{ margin: "18px 0" }} />
+      <SessionAnalyticsSection
+        sectionLabel="YES"
+        sessionAnalytics={sessionAnalyticsBySide?.YES}
+        peakNotionalCapUsdc={peakNotionalCapUsdc}
+      />
+      <Divider style={{ margin: "18px 0" }} />
+      <SessionAnalyticsSection
+        sectionLabel="NO"
+        sessionAnalytics={sessionAnalyticsBySide?.NO}
+        peakNotionalCapUsdc={peakNotionalCapUsdc}
+      />
     </Card>
   );
 }

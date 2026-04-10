@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "poly-web3"
-version = "1.2.1"
+version = "1.2.2"
 description = "Polymarket monorepo: redeem/split/merge SDK, profit web analyzer, and position watcher"
 readme = "README.md"
 requires-python = ">=3.11"

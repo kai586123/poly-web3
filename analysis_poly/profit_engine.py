@@ -33,6 +33,7 @@ class _Lot:
 @dataclass
 class _TokenState:
     token_id: str
+    side: str
     outcome: str
     lots: deque[_Lot]
     realized_pnl_usdc: float = 0.0
@@ -55,6 +56,8 @@ class _Event:
     tx: str
     kind: str
     token_id: str | None = None
+    token_side: str | None = None
+    token_outcome: str | None = None
     side: str | None = None
     size: float = 0.0
     price: float = 0.0
@@ -66,6 +69,8 @@ class _Event:
 class _SessionAccumulator:
     market_slug: str
     start_timestamp: int
+    entry_side: str | None = None
+    entry_outcome: str | None = None
     open_timestamp: int | None = None
     open_notional_usdc: float = 0.0
     open_qty: float = 0.0
@@ -84,6 +89,8 @@ class MarketReplayResult:
     warnings: list[WarningItem]
     trade_sessions: list[TradeSession]
     session_diagnostics: SessionAnalyticsDiagnostics
+    side_trade_sessions: dict[str, list[TradeSession]]
+    side_session_diagnostics: dict[str, SessionAnalyticsDiagnostics]
 
 
 SESSION_EXCLUSION_WARNING_CODES = {
@@ -135,8 +142,18 @@ class ProfitEngine:
     ) -> MarketReplayResult:
         warnings: list[WarningItem] = []
         token_states: dict[str, _TokenState] = {
-            market.up_token_id: _TokenState(token_id=market.up_token_id, outcome="Up", lots=deque()),
-            market.down_token_id: _TokenState(token_id=market.down_token_id, outcome="Down", lots=deque()),
+            market.up_token_id: _TokenState(
+                token_id=market.up_token_id,
+                side="YES",
+                outcome=_market_outcome_label(market, 0, fallback="Yes"),
+                lots=deque(),
+            ),
+            market.down_token_id: _TokenState(
+                token_id=market.down_token_id,
+                side="NO",
+                outcome=_market_outcome_label(market, 1, fallback="No"),
+                lots=deque(),
+            ),
         }
 
         events, build_warnings, maker_reward_enabled, has_maker_trade = self._build_market_events(
@@ -154,12 +171,22 @@ class ProfitEngine:
         trade_sessions: list[TradeSession] = []
         session_diagnostics = SessionAnalyticsDiagnostics()
         active_session: _SessionAccumulator | None = None
+        side_trade_sessions: dict[str, list[TradeSession]] = {"YES": [], "NO": []}
+        side_session_diagnostics: dict[str, SessionAnalyticsDiagnostics] = {
+            "YES": SessionAnalyticsDiagnostics(),
+            "NO": SessionAnalyticsDiagnostics(),
+        }
+        side_active_sessions: dict[str, _SessionAccumulator | None] = {
+            market.up_token_id: None,
+            market.down_token_id: None,
+        }
         for event in events:
             was_flat = _is_market_flat(token_states)
             event_deltas: list[PnlDelta] = []
             event_warnings: list[WarningItem] = []
             if event.kind == "TRADE" and event.token_id in token_states:
                 token_state = token_states[event.token_id]
+                token_was_flat = token_state.position_qty <= 1e-12
                 token_state.trade_count += 1
                 event_deltas, event_warnings = self._apply_trade(
                     market_slug=market.slug,
@@ -167,9 +194,22 @@ class ProfitEngine:
                     event=event,
                     maker_reward_enabled=maker_reward_enabled,
                 )
+                side_active_sessions[event.token_id] = _advance_side_session(
+                    market_slug=market.slug,
+                    token_state=token_state,
+                    active_session=side_active_sessions[event.token_id],
+                    event=event,
+                    event_deltas=event_deltas,
+                    event_warnings=event_warnings,
+                    was_flat=token_was_flat,
+                    side_trade_sessions=side_trade_sessions,
+                    side_session_diagnostics=side_session_diagnostics,
+                )
             elif event.kind == "SPLIT":
                 up_state = token_states[market.up_token_id]
                 down_state = token_states[market.down_token_id]
+                up_was_flat = up_state.position_qty <= 1e-12
+                down_was_flat = down_state.position_qty <= 1e-12
 
                 qty_each = event.size / 2.0
                 usdc_each = event.usdc_size / 2.0
@@ -178,8 +218,31 @@ class ProfitEngine:
                     down_state.lots.append(_Lot(qty=qty_each, cost_per_qty=usdc_each / qty_each))
                 up_state.split_qty += qty_each
                 down_state.split_qty += qty_each
+                for token_state, token_was_flat, token_id in (
+                    (up_state, up_was_flat, market.up_token_id),
+                    (down_state, down_was_flat, market.down_token_id),
+                ):
+                    side_event = _side_event_from_split_or_settlement(
+                        base_event=event,
+                        market=market,
+                        token_id=token_id,
+                        size=qty_each,
+                        usdc_size=usdc_each,
+                    )
+                    side_active_sessions[token_id] = _advance_side_session(
+                        market_slug=market.slug,
+                        token_state=token_state,
+                        active_session=side_active_sessions[token_id],
+                        event=side_event,
+                        event_deltas=[],
+                        event_warnings=[],
+                        was_flat=token_was_flat,
+                        side_trade_sessions=side_trade_sessions,
+                        side_session_diagnostics=side_session_diagnostics,
+                    )
             elif event.kind == "REDEEM" and event.token_id in token_states:
                 token_state = token_states[event.token_id]
+                token_was_flat = token_state.position_qty <= 1e-12
                 event_deltas, event_warnings = self._close_position(
                     market_slug=market.slug,
                     token_state=token_state,
@@ -189,6 +252,17 @@ class ProfitEngine:
                     missing_cost_warn_code="REDEEM_OVERSELL_ZERO_COST",
                 )
                 token_state.redeem_qty += event.size
+                side_active_sessions[event.token_id] = _advance_side_session(
+                    market_slug=market.slug,
+                    token_state=token_state,
+                    active_session=side_active_sessions[event.token_id],
+                    event=_enrich_event_with_side(event, market, event.token_id),
+                    event_deltas=event_deltas,
+                    event_warnings=event_warnings,
+                    was_flat=token_was_flat,
+                    side_trade_sessions=side_trade_sessions,
+                    side_session_diagnostics=side_session_diagnostics,
+                )
             pnl_deltas.extend(event_deltas)
             warnings.extend(event_warnings)
 
@@ -208,13 +282,28 @@ class ProfitEngine:
                 _apply_session_diagnostic(session_diagnostics, session)
                 active_session = None
 
-        settlement_event, settlement_deltas, settlement_warnings = self._settle_closed_market_positions(
+        settlement_event, settlement_side_events, settlement_deltas, settlement_warnings = self._settle_closed_market_positions(
             market=market,
             token_states=token_states,
             events=events,
         )
         pnl_deltas.extend(settlement_deltas)
         warnings.extend(settlement_warnings)
+        for side_event in settlement_side_events:
+            token_state = token_states.get(side_event.token_id or "")
+            if token_state is None:
+                continue
+            side_active_sessions[side_event.token_id] = _advance_side_session(
+                market_slug=market.slug,
+                token_state=token_state,
+                active_session=side_active_sessions[side_event.token_id],
+                event=side_event,
+                event_deltas=[delta for delta in settlement_deltas if delta.token_id == side_event.token_id],
+                event_warnings=[warning for warning in settlement_warnings if warning.token_id == side_event.token_id],
+                was_flat=False,
+                side_trade_sessions=side_trade_sessions,
+                side_session_diagnostics=side_session_diagnostics,
+            )
         if settlement_event is not None:
             active_session = _record_session_event(active_session, settlement_event, settlement_deltas, settlement_warnings)
             if active_session is not None:
@@ -232,6 +321,11 @@ class ProfitEngine:
         if active_session is not None:
             session_diagnostics.total_detected_sessions += 1
             session_diagnostics.excluded_open_session_count += 1
+        for token_id, side_session in side_active_sessions.items():
+            if side_session is not None:
+                side = token_states[token_id].side
+                side_session_diagnostics[side].total_detected_sessions += 1
+                side_session_diagnostics[side].excluded_open_session_count += 1
 
         if not maker_reward_enabled and has_maker_trade:
             warnings.append(
@@ -250,6 +344,7 @@ class ProfitEngine:
             token_reports.append(
                 TokenReport(
                     token_id=token_state.token_id,
+                    side=token_state.side,
                     outcome=token_state.outcome,
                     realized_pnl_usdc=round(token_state.realized_pnl_usdc, 10),
                     taker_fee_usdc=round(token_state.taker_fee_usdc, 10),
@@ -268,6 +363,8 @@ class ProfitEngine:
             condition_id=market.condition_id,
             up_token_id=market.up_token_id,
             down_token_id=market.down_token_id,
+            yes_outcome_label=_market_outcome_label(market, 0, fallback="Yes"),
+            no_outcome_label=_market_outcome_label(market, 1, fallback="No"),
             realized_pnl_usdc=round(sum(t.realized_pnl_usdc for t in token_reports), 10),
             taker_fee_usdc=round(sum(t.taker_fee_usdc for t in token_reports), 10),
             maker_reward_usdc=round(sum(t.maker_reward_usdc for t in token_reports), 10),
@@ -282,6 +379,8 @@ class ProfitEngine:
             warnings=warnings,
             trade_sessions=trade_sessions,
             session_diagnostics=session_diagnostics,
+            side_trade_sessions=side_trade_sessions,
+            side_session_diagnostics=side_session_diagnostics,
         )
 
     def _build_market_events(
@@ -308,6 +407,8 @@ class ProfitEngine:
                     tx=trade.transaction_hash,
                     kind="TRADE",
                     token_id=trade.asset,
+                    token_side=_token_side_for_asset(market, trade.asset),
+                    token_outcome=_token_outcome_for_asset(market, trade.asset),
                     side=trade.side,
                     size=float(trade.size),
                     price=float(trade.price),
@@ -412,18 +513,18 @@ class ProfitEngine:
         market: PolymarketMarket,
         token_states: dict[str, _TokenState],
         events: list[_Event],
-    ) -> tuple[_Event | None, list[PnlDelta], list[WarningItem]]:
+    ) -> tuple[_Event | None, list[_Event], list[PnlDelta], list[WarningItem]]:
         if not market.closed:
-            return None, [], []
+            return None, [], [], []
 
         unsettled_states = [state for state in token_states.values() if state.position_qty > 1e-12]
         if not unsettled_states:
-            return None, [], []
+            return None, [], [], []
 
         winner_token = _resolve_winner_token(market)
         settlement_ts = _settlement_timestamp(market, events)
         if not winner_token:
-            return _Event(timestamp=settlement_ts, tx="settlement", kind="SETTLEMENT"), [], [
+            return _Event(timestamp=settlement_ts, tx="settlement", kind="SETTLEMENT"), [], [], [
                 WarningItem(
                     timestamp=settlement_ts,
                     market_slug=market.slug,
@@ -434,6 +535,7 @@ class ProfitEngine:
 
         deltas: list[PnlDelta] = []
         warnings: list[WarningItem] = []
+        side_events: list[_Event] = []
         settled_qty = 0.0
         settled_proceeds = 0.0
         for token_state in unsettled_states:
@@ -451,6 +553,18 @@ class ProfitEngine:
             )
             deltas.extend(close_deltas)
             warnings.extend(close_warnings)
+            side_events.append(
+                _Event(
+                    timestamp=settlement_ts,
+                    tx="settlement",
+                    kind="SETTLEMENT",
+                    token_id=token_state.token_id,
+                    token_side=token_state.side,
+                    token_outcome=token_state.outcome,
+                    size=quantity,
+                    usdc_size=proceeds,
+                )
+            )
 
         return (
             _Event(
@@ -460,6 +574,7 @@ class ProfitEngine:
                 size=settled_qty,
                 usdc_size=settled_proceeds,
             ),
+            side_events,
             deltas,
             warnings,
         )
@@ -562,6 +677,69 @@ def _resolve_winner_token(market: PolymarketMarket) -> str | None:
     return None
 
 
+def _market_outcome_label(market: PolymarketMarket, index: int, fallback: str) -> str:
+    if index < len(market.outcomes):
+        label = str(market.outcomes[index]).strip()
+        if label:
+            return label
+    return fallback
+
+
+def _token_side_for_asset(market: PolymarketMarket, asset: str | None) -> str | None:
+    if asset == market.up_token_id:
+        return "YES"
+    if asset == market.down_token_id:
+        return "NO"
+    return None
+
+
+def _token_outcome_for_asset(market: PolymarketMarket, asset: str | None) -> str | None:
+    side = _token_side_for_asset(market, asset)
+    if side == "YES":
+        return _market_outcome_label(market, 0, fallback="Yes")
+    if side == "NO":
+        return _market_outcome_label(market, 1, fallback="No")
+    return None
+
+
+def _enrich_event_with_side(event: _Event, market: PolymarketMarket, token_id: str | None) -> _Event:
+    return _Event(
+        timestamp=event.timestamp,
+        tx=event.tx,
+        kind=event.kind,
+        token_id=token_id,
+        token_side=_token_side_for_asset(market, token_id),
+        token_outcome=_token_outcome_for_asset(market, token_id),
+        side=event.side,
+        size=event.size,
+        price=event.price,
+        usdc_size=event.usdc_size,
+        is_taker=event.is_taker,
+    )
+
+
+def _side_event_from_split_or_settlement(
+    base_event: _Event,
+    market: PolymarketMarket,
+    token_id: str,
+    size: float,
+    usdc_size: float,
+) -> _Event:
+    return _Event(
+        timestamp=base_event.timestamp,
+        tx=base_event.tx,
+        kind=base_event.kind,
+        token_id=token_id,
+        token_side=_token_side_for_asset(market, token_id),
+        token_outcome=_token_outcome_for_asset(market, token_id),
+        side=base_event.side,
+        size=size,
+        price=base_event.price,
+        usdc_size=usdc_size,
+        is_taker=base_event.is_taker,
+    )
+
+
 def _market_ts_from_slug(market_slug: str) -> int | None:
     try:
         return int(str(market_slug).rsplit("-", 1)[-1])
@@ -602,6 +780,45 @@ def _inventory_cost_basis_usdc(token_states: dict[str, _TokenState]) -> float:
     return total
 
 
+def _token_inventory_cost_basis_usdc(token_state: _TokenState) -> float:
+    total = 0.0
+    for lot in token_state.lots:
+        total += float(lot.qty) * float(lot.cost_per_qty)
+    return total
+
+
+def _advance_side_session(
+    market_slug: str,
+    token_state: _TokenState,
+    active_session: _SessionAccumulator | None,
+    event: _Event,
+    event_deltas: list[PnlDelta],
+    event_warnings: list[WarningItem],
+    was_flat: bool,
+    side_trade_sessions: dict[str, list[TradeSession]],
+    side_session_diagnostics: dict[str, SessionAnalyticsDiagnostics],
+) -> _SessionAccumulator | None:
+    is_flat = token_state.position_qty <= 1e-12
+    if was_flat and not is_flat and active_session is None:
+        active_session = _SessionAccumulator(market_slug=market_slug, start_timestamp=event.timestamp)
+    if active_session is None and (not was_flat or not is_flat):
+        active_session = _SessionAccumulator(market_slug=market_slug, start_timestamp=event.timestamp)
+    active_session = _record_session_event(active_session, event, event_deltas, event_warnings)
+    if active_session is not None:
+        inv = _token_inventory_cost_basis_usdc(token_state)
+        if inv > active_session.peak_position_notional_usdc:
+            active_session.peak_position_notional_usdc = inv
+    if active_session is not None and is_flat:
+        session = _finalize_session(active_session, end_timestamp=event.timestamp)
+        side = token_state.side
+        side_trade_sessions[side].append(session)
+        side_session_diagnostics[side].total_detected_sessions += 1
+        side_session_diagnostics[side].closed_sessions += 1
+        _apply_session_diagnostic(side_session_diagnostics[side], session)
+        return None
+    return active_session
+
+
 def _record_session_event(
     active_session: _SessionAccumulator | None,
     event: _Event,
@@ -621,6 +838,8 @@ def _record_session_event(
         active_session.open_qty += float(event.size)
         if active_session.open_timestamp is None:
             active_session.open_timestamp = int(event.timestamp)
+            active_session.entry_side = event.token_side
+            active_session.entry_outcome = event.token_outcome
     elif event.kind == "TRADE" and event.side == "SELL" and event.size > 0:
         active_session.close_notional_usdc += float(event.size) * float(event.price)
         active_session.close_qty += float(event.size)
@@ -655,6 +874,8 @@ def _finalize_session(active_session: _SessionAccumulator, end_timestamp: int) -
         market_slug=active_session.market_slug,
         start_timestamp=int(active_session.start_timestamp),
         end_timestamp=int(end_timestamp),
+        entry_side=active_session.entry_side,
+        entry_outcome=active_session.entry_outcome,
         open_timestamp=int(open_timestamp) if open_timestamp is not None else None,
         open_hour_utc=(
             datetime.fromtimestamp(int(open_timestamp), tz=timezone.utc).hour

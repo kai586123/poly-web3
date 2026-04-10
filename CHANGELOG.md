@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.2
+
+- Analyzer: YES/NO side mapping on tokens and reports; overlay YES/NO PnL on the total curve; session analytics split into ALL / YES / NO with side-specific sessions (not only entry-side tagging).
+- Analyzer: market result cache `schema_version` (v2) so stale cached sessions without `entry_side` are not reused.
+- Tests: session analytics, profit engine side labeling, cache schema rejection.
+
 ## 1.2.1
 
 - README: move optional pip uninstall instructions to section 一; renumber following sections.

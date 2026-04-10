@@ -1,4 +1,4 @@
-from analysis_poly.analyzer import _build_session_analytics
+from analysis_poly.analyzer import _build_session_analytics, _build_session_analytics_by_side
 from analysis_poly.models import ActivityRecord, PolymarketMarket, SessionAnalyticsDiagnostics, TradeRecord, TradeSession
 from analysis_poly.profit_engine import ProfitEngine
 
@@ -48,6 +48,8 @@ def test_session_detection_keeps_buy_sell_buy_sell_in_single_flat_to_flat_sessio
     assert session.event_count == 4
     assert session.start_timestamp == 1000
     assert session.end_timestamp == 1030
+    assert session.entry_side == "YES"
+    assert session.entry_outcome == "Up"
     assert round(session.open_avg_price, 6) == 0.466667
     assert round(session.close_avg_price, 6) == 0.633333
     assert session.peak_position_notional_usdc > 0
@@ -234,3 +236,98 @@ def test_session_bucket_aggregation_includes_weighted_returns_and_half_win_ties(
     assert peak_bucket.session_count == 3
     assert round(peak_bucket.sum_peak_position_notional_usdc, 6) == 45.0
     assert round(peak_bucket.weighted_return_on_open_notional_pct, 6) == 10.0
+
+
+def test_session_analytics_can_split_all_sessions_into_yes_and_no_groups():
+    sessions = [
+        TradeSession(
+            market_slug="btc-updown-5m-1000",
+            start_timestamp=1000,
+            end_timestamp=1010,
+            entry_side="YES",
+            entry_outcome="Yes",
+            open_timestamp=1000,
+            open_hour_utc=0,
+            open_avg_price=0.43,
+            open_notional_usdc=2,
+            open_qty=4,
+            close_avg_price=0.55,
+            close_notional_usdc=2.4,
+            close_qty=4,
+            peak_position_notional_usdc=4,
+            realized_pnl_usdc=0.4,
+            return_on_open_notional_pct=20,
+            event_count=2,
+            has_trade_entry=True,
+            is_chart_eligible=True,
+        ),
+        TradeSession(
+            market_slug="btc-updown-5m-1010",
+            start_timestamp=1010,
+            end_timestamp=1020,
+            entry_side="NO",
+            entry_outcome="No",
+            open_timestamp=1010,
+            open_hour_utc=1,
+            open_avg_price=0.61,
+            open_notional_usdc=3,
+            open_qty=5,
+            close_avg_price=0.4,
+            close_notional_usdc=2,
+            close_qty=5,
+            peak_position_notional_usdc=6,
+            realized_pnl_usdc=-1,
+            return_on_open_notional_pct=-33.333333,
+            event_count=2,
+            has_trade_entry=True,
+            is_chart_eligible=True,
+        ),
+    ]
+
+    analytics_by_side = _build_session_analytics_by_side(sessions)
+
+    assert analytics_by_side["YES"].diagnostics.total_detected_sessions == 1
+    assert analytics_by_side["YES"].trade_sessions[0].entry_side == "YES"
+    assert analytics_by_side["YES"].open_hour_buckets[0].session_count == 1
+
+    assert analytics_by_side["NO"].diagnostics.total_detected_sessions == 1
+    assert analytics_by_side["NO"].trade_sessions[0].entry_side == "NO"
+    assert analytics_by_side["NO"].open_hour_buckets[1].session_count == 1
+
+
+def test_profit_engine_builds_true_side_sessions_for_mixed_yes_no_market_session():
+    market = PolymarketMarket(
+        slug="btc-updown-5m-2000",
+        condition_id="cond_mixed",
+        up_token_id="yes_token",
+        down_token_id="no_token",
+        outcomes=["Yes", "No"],
+        outcome_prices=[0.5, 0.5],
+    )
+    trades = [
+        _trade("0x01", 2000, "BUY", "yes_token", "cond_mixed", 10, 0.20),
+        _trade("0x02", 2010, "BUY", "no_token", "cond_mixed", 10, 0.70),
+        _trade("0x03", 2020, "SELL", "yes_token", "cond_mixed", 10, 0.40),
+        _trade("0x04", 2030, "SELL", "no_token", "cond_mixed", 10, 0.50),
+    ]
+    engine = ProfitEngine(fee_rate_bps=0, maker_reward_ratio=0, missing_cost_warn_qty=0.5)
+
+    result = engine.analyze_market(
+        market=market,
+        taker_trades=trades,
+        all_trades=trades,
+        split_activities=[],
+        redeem_activities=[],
+    )
+
+    assert len(result.trade_sessions) == 1
+    assert result.trade_sessions[0].entry_side == "YES"
+
+    yes_sessions = result.side_trade_sessions["YES"]
+    no_sessions = result.side_trade_sessions["NO"]
+    assert len(yes_sessions) == 1
+    assert len(no_sessions) == 1
+    assert yes_sessions[0].entry_side == "YES"
+    assert no_sessions[0].entry_side == "NO"
+    assert yes_sessions[0].realized_pnl_usdc > 0
+    assert no_sessions[0].realized_pnl_usdc < 0

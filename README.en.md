@@ -10,7 +10,7 @@ Python SDK for redeeming and splitting/merging Polymarket positions via Proxy/Sa
 
 ## Monorepo layout
 
-This repository ships **three** Python modules from one tree (`poly_web3`, `analysis_poly`, `poly_position_watcher`). **Recommended workflow:** install **third-party** dependencies from `requirements.txt` into a venv, **do not** install this repo as a package (`pip install -e .` / `pip install .`). Run with `PYTHONPATH` pointing at the repo root (or use `./scripts/analysis-poly` / `./scripts/analysis-poly-open`).
+This repository ships **three** Python modules from one tree (`poly_web3`, `analysis_poly`, `poly_position_watcher`). **Recommended workflow:** `pip install -r requirements.txt` for **third-party** dependencies only; **do not** install this repo as a package (`pip install -e .` / `pip install .`). Run from the **repository root** using `./scripts/analysis-poly` / `./scripts/analysis-poly-open`, or `python -m analysis_poly....` / `python main.py` with the working directory set to the repo root.
 
 | Package | Import | Purpose |
 |---------|--------|---------|
@@ -18,33 +18,31 @@ This repository ships **three** Python modules from one tree (`poly_web3`, `anal
 | Analyzer | `analysis_poly` | FastAPI dashboard + fee-aware PnL engine |
 | Watcher | `poly_position_watcher` | Position / trade helpers (CLOB + websocket) |
 
-**Local setup (recommended for development):**
+**Local setup:**
 
 ```bash
 cd /path/to/poly-web3   # repository root (this folder)
-python3.11 -m venv .venv && source .venv/bin/activate
 pip install -U pip
 pip install -r requirements.txt
 # optional: pip install -r requirements-dev.txt
-export PYTHONPATH="${PWD}:${PYTHONPATH}"
 ```
 
-Use a **project-local venv** so nothing is installed into the system Python. `pip install -r requirements.txt` installs only upstream packages, not this project.
-
-**Zero pip is not realistic** if you still fetch dependencies from PyPI—you need some installer (`pip`, `uv pip`, etc.) unless you vendor wheels yourself.
+`pip install -r requirements.txt` installs third-party dependencies only, not this repository as a package.
 
 When `analysis_poly` is loaded from a **source checkout** (repo with `pyproject.toml` next to `analysis_poly/`), analyzer cache defaults to `<repo>/.cache/poly-web3` and reports to `<repo>/.data/poly-web3/reports` (both gitignored). Plain wheel installs still use OS user cache dirs unless `ANALYSIS_POLY_CACHE_DIR` / `ANALYSIS_POLY_REPORTS_DIR` are set. See `analysis_poly/storage_paths.py`.
 
-**Runners (no editable install needed):** `./scripts/analysis-poly`, `./scripts/analysis-poly-open`, or `python -m analysis_poly.cli` / `python -m analysis_poly.open_with_params` with `PYTHONPATH` set.
+**From a clone (repo root as cwd):** `./scripts/analysis-poly`, `./scripts/analysis-poly-open`, or `python -m analysis_poly.cli` / `python -m analysis_poly.open_with_params`.
+
+The names `analysis-poly` / `analysis-poly-open` on `PATH` come from `[project.scripts]` and require installing this repository as a package (`pip install .` / `pip install -e .`) or a wheel that defines those entry points. They are **not** created by `pip install -r requirements.txt` alone.
 
 **UI assets:** if you change `frontend/src`, run `npm install && npm run build` to refresh `analysis_poly/static/dist/`.
 
-PyPI installs (`pip install poly-web3`) refer to the published SDK wheel; the analyzer and watcher are **included when you work from this git checkout** (via `PYTHONPATH` or installing from source if you choose).
+`pip install poly-web3` from PyPI is the published SDK wheel; the full analyzer and watcher stack is used from this git checkout (run from repo root as above) or by installing from source.
 
 Profit analyzer (fee impact, PnL curves, extra charts) is **bundled**. See [Profit analyzer](#profit-analyzer-bundled).
 
 ```bash
-# published wheel (SDK only); from a clone use requirements.txt + PYTHONPATH
+# published wheel (SDK only); from a clone: requirements.txt + run from repo root
 # required Python >= 3.11
 pip install poly-web3
 ```
@@ -272,7 +270,7 @@ print(merge_all_result)
 
 ### Profit analyzer (bundled)
 
-From a **local clone**, after `pip install -r requirements.txt` and `export PYTHONPATH="${PWD}:${PYTHONPATH}"`, you can analyze one address for:
+From a **local clone**, after `pip install -r requirements.txt` (run commands from the **repository root**), you can analyze one address for:
 - Trading fee impact (`Net PnL` vs `No-Fee PnL`)
 - PnL curve and ratio/metrics visualization
 

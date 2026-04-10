@@ -69,6 +69,46 @@ def test_profit_engine_taker_buy_sell_and_redeem_warning():
     assert any(w.code == "REDEEM_SKIP_UNKNOWN_WINNER" for w in warnings)
 
 
+def test_profit_engine_marks_yes_no_side_and_market_outcome_labels():
+    market = PolymarketMarket(
+        slug="btc-updown-5m-1000",
+        condition_id="cond_yes_no",
+        up_token_id="yes_token",
+        down_token_id="no_token",
+        outcomes=["Yes", "No"],
+        outcome_prices=[0.5, 0.5],
+    )
+
+    taker_buy = TradeRecord.model_validate(
+        {
+            "transactionHash": "0xyes",
+            "timestamp": 1000,
+            "side": "BUY",
+            "asset": "yes_token",
+            "conditionId": "cond_yes_no",
+            "size": 4,
+            "price": 0.55,
+        }
+    )
+
+    engine = ProfitEngine(fee_rate_bps=1000, maker_reward_ratio=0.2, missing_cost_warn_qty=0.5)
+    report, _, _ = engine.process_market(
+        market=market,
+        taker_trades=[taker_buy],
+        all_trades=[taker_buy],
+        split_activities=[],
+        redeem_activities=[],
+    )
+
+    token_by_id = {token.token_id: token for token in report.tokens}
+    assert report.yes_outcome_label == "Yes"
+    assert report.no_outcome_label == "No"
+    assert token_by_id["yes_token"].side == "YES"
+    assert token_by_id["yes_token"].outcome == "Yes"
+    assert token_by_id["no_token"].side == "NO"
+    assert token_by_id["no_token"].outcome == "No"
+
+
 def test_profit_engine_split_allocation():
     market = PolymarketMarket(
         slug="eth-updown-15m-2000",

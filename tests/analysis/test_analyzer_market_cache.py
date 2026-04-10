@@ -1,6 +1,6 @@
 import asyncio
 
-from analysis_poly.analyzer import PolymarketProfitAnalyzer, _market_order_key
+from analysis_poly.analyzer import PolymarketProfitAnalyzer, _market_order_key, _result_from_cache_payload
 from analysis_poly.market_cache import MarketMetadataCache
 from analysis_poly.models import PolymarketMarket
 
@@ -64,3 +64,18 @@ def test_market_order_key_uses_slug_timestamp():
     assert _market_order_key("btc-updown-5m-100") < _market_order_key("btc-updown-5m-200")
     # Invalid slug timestamps should be pushed to the end.
     assert _market_order_key("invalid-slug")[0] > 10**10
+
+
+def test_result_cache_payload_rejects_old_schema():
+    payload = {
+        "market_slug": "btc-updown-5m-1000",
+        "market_report": {"market_slug": "btc-updown-5m-1000"},
+        "market_report_no_fee": {"market_slug": "btc-updown-5m-1000"},
+        "deltas": [],
+        "deltas_no_fee": [],
+        "warnings": [],
+        "trade_sessions": [],
+        "session_diagnostics": {},
+    }
+
+    assert _result_from_cache_payload("btc-updown-5m-1000", payload) is None

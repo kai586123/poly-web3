@@ -1,7 +1,5 @@
 # Runtime dependencies for poly-web3 (SDK + analyzer + watcher).
-# Install into a venv only — do not install this repo as a package:
-#   pip install -r requirements.txt
-# Then run with PYTHONPATH pointing at the repository root (see README.md).
+# pip install -r requirements.txt  — third-party deps only; see README (do not pip install this repo as the default workflow).
 eth-utils==5.3.1
 fastapi>=0.115.0
 httpx>=0.28.1

@@ -43,6 +43,15 @@ function reduceCurveDelta(points) {
   return byTs;
 }
 
+function curvePointsToSeries(points) {
+  return [...(points || [])]
+    .map((point) => ({
+      ts: Number(point.timestamp || 0),
+      value: Number(point.cumulative_realized_pnl_usdc || 0),
+    }))
+    .sort((a, b) => a.ts - b.ts);
+}
+
 function buildDrawdownMarkers(marketCurves) {
   const worstDropBySlug = new Map();
 
@@ -201,8 +210,11 @@ export default function App({ serverDefaults }) {
   const [totalSeriesNoFee, setTotalSeriesNoFee] = useState([]);
   const [symbolSeries, setSymbolSeries] = useState({});
   const [symbolSeriesNoFee, setSymbolSeriesNoFee] = useState({});
+  const [sideSeries, setSideSeries] = useState({ YES: [], NO: [] });
+  const [sideSeriesNoFee, setSideSeriesNoFee] = useState({ YES: [], NO: [] });
   const [drawdownMarkers, setDrawdownMarkers] = useState([]);
   const [sessionAnalytics, setSessionAnalytics] = useState(buildEmptySessionAnalytics);
+  const [sessionAnalyticsBySide, setSessionAnalyticsBySide] = useState({});
 
   const eventSourceRef = useRef(null);
   const bootstrapHandledRef = useRef(false);
@@ -290,8 +302,11 @@ export default function App({ serverDefaults }) {
     setTotalSeriesNoFee([]);
     setSymbolSeries({});
     setSymbolSeriesNoFee({});
+    setSideSeries({ YES: [], NO: [] });
+    setSideSeriesNoFee({ YES: [], NO: [] });
     setDrawdownMarkers([]);
     setSessionAnalytics(buildEmptySessionAnalytics());
+    setSessionAnalyticsBySide({});
   }
 
   function clearRunData() {
@@ -415,7 +430,20 @@ export default function App({ serverDefaults }) {
     }
     setSymbolSeriesNoFee(nextNoFeeSymbolSeries);
 
+    setSideSeries({
+      YES: curvePointsToSeries(report.side_curves?.YES || []),
+      NO: curvePointsToSeries(report.side_curves?.NO || []),
+    });
+    setSideSeriesNoFee({
+      YES: curvePointsToSeries(report.side_curves_no_fee?.YES || []),
+      NO: curvePointsToSeries(report.side_curves_no_fee?.NO || []),
+    });
+
     setSessionAnalytics(normalizeSessionAnalytics(report.session_analytics));
+    setSessionAnalyticsBySide({
+      YES: normalizeSessionAnalytics(report.session_analytics_by_side?.YES),
+      NO: normalizeSessionAnalytics(report.session_analytics_by_side?.NO),
+    });
   }
 
   function recomputeTotalSeriesNoFee() {
@@ -668,12 +696,18 @@ export default function App({ serverDefaults }) {
           totalSeriesNoFee={totalSeriesNoFee}
           symbolSeries={symbolSeries}
           symbolSeriesNoFee={symbolSeriesNoFee}
+          sideSeries={sideSeries}
+          sideSeriesNoFee={sideSeriesNoFee}
           drawdownMarkers={drawdownMarkers}
         />
 
         <QuantMetricsPanel totalSeries={totalSeries} totalSeriesNoFee={totalSeriesNoFee} markets={markets} />
 
-        <InsightCharts sessionAnalytics={sessionAnalytics} peakNotionalCapUsdc={formData.peakNotionalCapUsdc} />
+        <InsightCharts
+          sessionAnalytics={sessionAnalytics}
+          sessionAnalyticsBySide={sessionAnalyticsBySide}
+          peakNotionalCapUsdc={formData.peakNotionalCapUsdc}
+        />
 
         <MarketTable markets={markets} />
       </div>
