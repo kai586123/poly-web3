@@ -18,7 +18,7 @@ export function buildDefaultForm(serverDefaults) {
     endTime: "",
     feeRateBps: "1000",
     missingCostWarnQty: "0.5",
-    makerRewardRatio: "0.2",
+    makerRewardRatio: "0",
     concurrency: "5",
     pageLimit: "1000",
     peakNotionalCapUsdc: "",

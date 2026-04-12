@@ -1,9 +1,16 @@
 # Changelog
 
+## 1.2.4
+
+- Analysis: CLOB **`/fee-rate`** responses that only expose **`base_fee`** (OpenAPI) are now parsed; fixes silent fallback to the crypto default when the dict omitted legacy keys.
+- Analysis: **Modeled maker rebate is off by default** — `ProfitEngine(apply_maker_reward=False)`, `AnalysisRequest.maker_reward_ratio=0`, UI default `0`. Opt in with **`ANALYSIS_POLY_ENABLE_MAKER_REBATE=1`** (and optional ratio); **`ANALYSIS_POLY_DISABLE_MAKER_REBATE=1`** still forces off.
+- Analysis: removed **UTC “today” skip** and **`MAKER_REWARD_DEFERRED_TODAY`** for modeled maker rebate (accrual at fill time for all days when rebate is enabled).
+- Tests: `test_polymarket_fee_rate_parse.py` for fee-rate JSON shapes.
+
 ## 1.2.3
 
 - Analysis: optional on-disk **raw API cache** (`analysis_poly/raw_api_cache.py`, `default_raw_api_cache_dir`) for Gamma market, trades, activity, and CLOB fee-rate payloads; wire into `PolymarketApiClient`. Disable with `ANALYSIS_POLY_DISABLE_RAW_API_CACHE=1`.
-- Analysis: **maker rebate** modeled path — stable `_trade_key` (rounded price/size) across separate `takerOnly` requests, dedupe duplicate trade rows, maker accrual gated by **fill UTC day** vs current day; `ANALYSIS_POLY_DISABLE_MAKER_REBATE=1` turns off modeled maker rebate on the net engine. Comments clarify rebates are not present in Data API trade JSON.
+- Analysis: **maker rebate** modeled path — stable `_trade_key` (rounded price/size) across separate `takerOnly` requests, dedupe duplicate trade rows; **off by default** (`ProfitEngine.apply_maker_reward=False`, `AnalysisRequest.maker_reward_ratio=0`). Enable with `ANALYSIS_POLY_ENABLE_MAKER_REBATE=1`; `ANALYSIS_POLY_DISABLE_MAKER_REBATE=1` still forces off. Comments clarify rebates are not present in Data API trade JSON.
 - Analyzer UI: fee-related status display (e.g. `StatusCard`); assorted fee / no-fee engine alignment and tests (`test_raw_api_cache`, profit engine trade-key/dedupe tests, `TokenReport.side` in filter-empty test).
 
 ## 1.2.2

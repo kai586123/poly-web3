@@ -109,7 +109,7 @@ class ProfitEngine:
         maker_reward_ratio: float,
         missing_cost_warn_qty: float,
         charge_taker_fee: bool = True,
-        apply_maker_reward: bool = True,
+        apply_maker_reward: bool = False,
     ):
         self._fee_rate_bps = fee_rate_bps
         self._maker_reward_ratio = maker_reward_ratio
@@ -164,7 +164,7 @@ class ProfitEngine:
             ),
         }
 
-        events, build_warnings, has_maker_trade = self._build_market_events(
+        events, build_warnings = self._build_market_events(
             market=market,
             taker_trades=taker_trades,
             all_trades=all_trades,
@@ -349,26 +349,6 @@ class ProfitEngine:
                 side_session_diagnostics[side].total_detected_sessions += 1
                 side_session_diagnostics[side].excluded_open_session_count += 1
 
-        if maker_rebate_category_enabled and has_maker_trade:
-            deferred_today = any(
-                e.kind == "TRADE"
-                and e.token_id in token_states
-                and not e.is_taker
-                and not _is_maker_rebate_day_eligible(e.timestamp)
-                for e in events
-            )
-            if deferred_today:
-                warnings.append(
-                    WarningItem(
-                        market_slug=market.slug,
-                        code="MAKER_REWARD_DEFERRED_TODAY",
-                        message=(
-                            "maker rebate for fills on the current UTC calendar day is excluded "
-                            "because Polymarket pays maker rebates daily in USDC after the day closes"
-                        ),
-                    )
-                )
-
         token_reports: list[TokenReport] = []
         for token_state in token_states.values():
             token_reports.append(
@@ -420,18 +400,14 @@ class ProfitEngine:
         all_trades: list[TradeRecord],
         split_activities: list[ActivityRecord],
         redeem_activities: list[ActivityRecord],
-    ) -> tuple[list[_Event], list[WarningItem], bool]:
+    ) -> tuple[list[_Event], list[WarningItem]]:
         warnings: list[WarningItem] = []
         taker_trades = _dedupe_trades_preserve_order(taker_trades)
         all_trades = _dedupe_trades_preserve_order(all_trades)
         taker_keys = {_trade_key(t) for t in taker_trades}
         events: list[_Event] = []
-        has_maker_trade = False
-
         for trade in all_trades:
             is_taker = _trade_key(trade) in taker_keys
-            if not is_taker:
-                has_maker_trade = True
             events.append(
                 _Event(
                     timestamp=trade.timestamp,
@@ -482,7 +458,7 @@ class ProfitEngine:
                 )
             )
 
-        return events, warnings, has_maker_trade
+        return events, warnings
 
     def _apply_trade(
         self,
@@ -526,15 +502,14 @@ class ProfitEngine:
             if event.is_taker and self._charge_taker_fee:
                 token_state.taker_fee_usdc += fee_usdc
 
-        # Maker rebate is MODELED (Data API trades have no rebate field). Polymarket pays a daily USDC pool;
-        # we credit maker_reward_ratio × fee_equivalent per maker-classified fill (fee_equivalent uses the
-        # same C×rate×p×(1−p) curve as taker fees). This can exceed wallet rebates if fills are misclassified
-        # as maker (see stable _trade_key) or pool share is below the headline category %.
+        # Maker rebate is MODELED (Data API trades have no rebate field). We credit maker_reward_ratio ×
+        # fee_equivalent per maker-classified fill at fill time (fee_equivalent uses the same C×rate×p×(1−p)
+        # curve as taker fees). This can exceed wallet rebates if fills are misclassified as maker (see stable
+        # _trade_key) or pool share is below the headline category %.
         if (
             not event.is_taker
             and maker_rebate_category_enabled
             and self._apply_maker_reward
-            and _is_maker_rebate_day_eligible(event.timestamp)
         ):
             maker_reward = fee_usdc * maker_reward_ratio
             token_state.realized_pnl_usdc += maker_reward
@@ -806,23 +781,6 @@ def _market_ts_from_slug(market_slug: str) -> int | None:
         return int(str(market_slug).rsplit("-", 1)[-1])
     except Exception:  # noqa: BLE001
         return None
-
-
-def _utc_day_start_ts(now: datetime | None = None) -> int:
-    dt = now or datetime.now(timezone.utc)
-    start = datetime(dt.year, dt.month, dt.day, tzinfo=timezone.utc)
-    return int(start.timestamp())
-
-
-def _utc_day_start_ts_for_timestamp(trade_ts: int) -> int:
-    dt = datetime.fromtimestamp(int(trade_ts), tz=timezone.utc)
-    start = datetime(dt.year, dt.month, dt.day, tzinfo=timezone.utc)
-    return int(start.timestamp())
-
-
-def _is_maker_rebate_day_eligible(trade_ts: int) -> bool:
-    """Rebates are distributed daily; only accrue for fills before the current UTC calendar day."""
-    return _utc_day_start_ts_for_timestamp(trade_ts) < _utc_day_start_ts()
 
 
 def _settlement_timestamp(market: PolymarketMarket, events: list[_Event]) -> int:

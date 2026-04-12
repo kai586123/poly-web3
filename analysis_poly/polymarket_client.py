@@ -219,7 +219,15 @@ def _parse_fee_rate_response(data: Any) -> float | None:
     if isinstance(data, (int, float, str)):
         return _to_float_or_none(data)
     if isinstance(data, dict):
-        for key in ("fee_rate_bps", "feeRateBps", "taker_fee_rate_bps", "takerFeeRateBps"):
+        # CLOB OpenAPI documents FeeRate.base_fee (see GET /fee-rate); keep legacy keys for older payloads.
+        for key in (
+            "base_fee",
+            "baseFee",
+            "fee_rate_bps",
+            "feeRateBps",
+            "taker_fee_rate_bps",
+            "takerFeeRateBps",
+        ):
             if key in data:
                 return _to_float_or_none(data[key])
     return None

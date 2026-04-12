@@ -160,16 +160,24 @@ class PolymarketProfitAnalyzer:
         )
         raw_api_cache = None if disable_raw_cache else RawPolymarketDataCache()
         client = PolymarketApiClient(timeout_sec=req.request_timeout_sec, raw_data_cache=raw_api_cache)
-        disable_maker_rebate_model = os.getenv("ANALYSIS_POLY_DISABLE_MAKER_REBATE", "").strip().lower() in (
+        # Modeled maker rebate is off by default (not from API). Set ANALYSIS_POLY_ENABLE_MAKER_REBATE=1 to enable.
+        # ANALYSIS_POLY_DISABLE_MAKER_REBATE=1 still forces off when set (legacy).
+        enable_maker_rebate = os.getenv("ANALYSIS_POLY_ENABLE_MAKER_REBATE", "").strip().lower() in (
             "1",
             "true",
             "yes",
         )
+        legacy_disable_maker_rebate = os.getenv("ANALYSIS_POLY_DISABLE_MAKER_REBATE", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        apply_maker_rebate_model = enable_maker_rebate and not legacy_disable_maker_rebate
         engine = ProfitEngine(
             fee_rate_bps=req.fee_rate_bps,
             maker_reward_ratio=req.maker_reward_ratio,
             missing_cost_warn_qty=req.missing_cost_warn_qty,
-            apply_maker_reward=not disable_maker_rebate_model,
+            apply_maker_reward=apply_maker_rebate_model,
         )
         engine_no_fee = ProfitEngine(
             fee_rate_bps=req.fee_rate_bps,

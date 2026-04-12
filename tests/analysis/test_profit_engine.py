@@ -222,7 +222,7 @@ def test_profit_engine_split_allocation():
     assert down.split_qty == 3
 
 
-def test_maker_reward_skipped_for_today_market_and_kept_for_history():
+def test_maker_reward_accrues_for_today_and_history_fills():
     day_start = int(
         datetime.now(timezone.utc)
         .replace(hour=0, minute=0, second=0, microsecond=0)
@@ -268,7 +268,12 @@ def test_maker_reward_skipped_for_today_market_and_kept_for_history():
         }
     )
 
-    engine = ProfitEngine(fee_rate_bps=1000, maker_reward_ratio=0.2, missing_cost_warn_qty=0.5)
+    engine = ProfitEngine(
+        fee_rate_bps=1000,
+        maker_reward_ratio=0.2,
+        missing_cost_warn_qty=0.5,
+        apply_maker_reward=True,
+    )
 
     today_report, _, today_warnings = engine.process_market(
         market=today_market,
@@ -285,13 +290,14 @@ def test_maker_reward_skipped_for_today_market_and_kept_for_history():
         redeem_activities=[],
     )
 
-    assert today_report.maker_reward_usdc == 0
-    assert any(w.code == "MAKER_REWARD_DEFERRED_TODAY" for w in today_warnings)
+    assert today_report.maker_reward_usdc > 0
+    assert not any(w.code == "MAKER_REWARD_DEFERRED_TODAY" for w in today_warnings)
     assert hist_report.maker_reward_usdc > 0
+    assert today_report.maker_reward_usdc == pytest.approx(hist_report.maker_reward_usdc)
 
 
-def test_maker_rebate_uses_trade_utc_day_not_slug():
-    """Rebate eligibility follows fill timestamp (daily USDC settlement), not slug suffix."""
+def test_maker_rebate_accrues_for_fill_even_when_slug_suffix_is_today():
+    """Maker rebate uses fill time for ordering; slug window need not match fill UTC day."""
     day_start = int(
         datetime.now(timezone.utc)
         .replace(hour=0, minute=0, second=0, microsecond=0)
@@ -317,7 +323,12 @@ def test_maker_rebate_uses_trade_utc_day_not_slug():
             "price": 0.5,
         }
     )
-    engine = ProfitEngine(fee_rate_bps=1000, maker_reward_ratio=0.2, missing_cost_warn_qty=0.5)
+    engine = ProfitEngine(
+        fee_rate_bps=1000,
+        maker_reward_ratio=0.2,
+        missing_cost_warn_qty=0.5,
+        apply_maker_reward=True,
+    )
     report, _, warnings = engine.process_market(
         market=market,
         taker_trades=[],
@@ -326,7 +337,6 @@ def test_maker_rebate_uses_trade_utc_day_not_slug():
         redeem_activities=[],
     )
     assert report.maker_reward_usdc > 0
-    assert not any(w.code == "MAKER_REWARD_DEFERRED_TODAY" for w in warnings)
 
 
 def test_engine_can_disable_maker_reward_in_no_fee_mode():

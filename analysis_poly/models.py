@@ -25,7 +25,7 @@ class AnalysisRequest(BaseModel):
     symbols: list[Literal["btc", "eth", "sol", "xrp"]]
     intervals: list[int]
     fee_rate_bps: float = 1000
-    maker_reward_ratio: float = 0.2
+    maker_reward_ratio: float = 0.0
     missing_cost_warn_qty: float = 0.5
     page_limit: int = 1000
     concurrency: int = 5
