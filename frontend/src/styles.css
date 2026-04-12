@@ -116,6 +116,10 @@ body {
   font-weight: 800;
 }
 
+.kpi-value-secondary {
+  font-size: 16px;
+}
+
 .kpi-divider {
   border-right: 1px solid #d5d8de;
 }

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import json
+import os
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,7 +13,6 @@ from datetime import datetime, timezone
 from loguru import logger
 
 from .market_cache import MarketMetadataCache
-from .market_result_cache import AddressMarketResultCache
 from .models import (
     AnalysisReport,
     AnalysisRequest,
@@ -31,18 +31,48 @@ from .models import (
     WarningItem,
 )
 from .polymarket_client import PolymarketApiClient
+from .raw_api_cache import RawPolymarketDataCache
 from .profit_engine import PnlDelta, ProfitEngine, build_curve
 from .slugs import MarketSlugSpec, generate_market_slug_specs
 
 MARKET_FETCH_CONCURRENCY_DEFAULT = 10
 MARKET_TIMESTAMP_CHUNK_SIZE_DEFAULT = 20
 MARKET_RESULT_CACHE_RECENT_WINDOW_SEC = 30 * 60
-MARKET_RESULT_CACHE_SCHEMA_VERSION = 2
+MARKET_RESULT_CACHE_SCHEMA_VERSION = 4
+DEFAULT_FALLBACK_FEE_RATE_BPS = 72.0
 EMIT_LIVE_CURVE_POINTS = False
 SESSION_PRICE_BIN_WIDTH = 0.01
 SESSION_PRICE_BIN_COUNT = 100
 SESSION_PEAK_NOTIONAL_BIN_WIDTH = 10.0
 SESSION_PEAK_NOTIONAL_BIN_COUNT = 200
+MARKET_CATEGORY_MAKER_REWARD_RATIO = {
+    "crypto": 0.20,
+    "sports": 0.25,
+    "finance": 0.25,
+    "politics": 0.25,
+    "economics": 0.25,
+    "culture": 0.25,
+    "weather": 0.25,
+    "other": 0.25,
+    "general": 0.25,
+    "mentions": 0.25,
+    "tech": 0.25,
+    "geopolitics": 0.0,
+}
+MARKET_CATEGORY_TAKER_FEE_RATE_BPS = {
+    "crypto": 72.0,
+    "sports": 30.0,
+    "finance": 40.0,
+    "politics": 40.0,
+    "economics": 50.0,
+    "culture": 50.0,
+    "weather": 50.0,
+    "other": 50.0,
+    "general": 50.0,
+    "mentions": 40.0,
+    "tech": 40.0,
+    "geopolitics": 0.0,
+}
 
 
 @dataclass
@@ -111,7 +141,6 @@ class NullHooks:
 class PolymarketProfitAnalyzer:
     def __init__(self):
         self._market_cache = MarketMetadataCache()
-        self._market_result_cache = AddressMarketResultCache()
         self._market_fetch_concurrency = MARKET_FETCH_CONCURRENCY_DEFAULT
         self._timestamp_chunk_size = MARKET_TIMESTAMP_CHUNK_SIZE_DEFAULT
 
@@ -124,17 +153,30 @@ class PolymarketProfitAnalyzer:
         stop_event = stop_event or asyncio.Event()
         hooks = hooks or NullHooks()
 
-        client = PolymarketApiClient(timeout_sec=req.request_timeout_sec)
+        disable_raw_cache = os.getenv("ANALYSIS_POLY_DISABLE_RAW_API_CACHE", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        raw_api_cache = None if disable_raw_cache else RawPolymarketDataCache()
+        client = PolymarketApiClient(timeout_sec=req.request_timeout_sec, raw_data_cache=raw_api_cache)
+        disable_maker_rebate_model = os.getenv("ANALYSIS_POLY_DISABLE_MAKER_REBATE", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
         engine = ProfitEngine(
             fee_rate_bps=req.fee_rate_bps,
             maker_reward_ratio=req.maker_reward_ratio,
             missing_cost_warn_qty=req.missing_cost_warn_qty,
+            apply_maker_reward=not disable_maker_rebate_model,
         )
         engine_no_fee = ProfitEngine(
             fee_rate_bps=req.fee_rate_bps,
             maker_reward_ratio=req.maker_reward_ratio,
             missing_cost_warn_qty=req.missing_cost_warn_qty,
             charge_taker_fee=False,
+            apply_maker_reward=False,
         )
 
         all_warnings: list[WarningItem] = []
@@ -158,8 +200,7 @@ class PolymarketProfitAnalyzer:
         total_running_pnl_no_fee = 0.0
         market_running_pnl: dict[str, float] = defaultdict(float)
         market_running_pnl_no_fee: dict[str, float] = defaultdict(float)
-        address_market_cache = self._market_result_cache.load(req.address)
-        result_cache_dirty = False
+        fee_rate_bps_cache: dict[str, float] = {}
 
         try:
             specs = generate_market_slug_specs(req.symbols, req.intervals, req.start_ts, req.end_ts)
@@ -201,10 +242,9 @@ class PolymarketProfitAnalyzer:
                                 client=client,
                                 engine=engine,
                                 engine_no_fee=engine_no_fee,
-                                address=req.address,
-                                address_market_cache=address_market_cache,
                                 req=req,
                                 market=market,
+                                fee_rate_bps_cache=fee_rate_bps_cache,
                             )
                             for market in batch_markets
                         )
@@ -283,8 +323,6 @@ class PolymarketProfitAnalyzer:
                         for warning in result.warnings:
                             all_warnings.append(warning)
                             await hooks.on_warning(warning)
-                        if result.cache_updated:
-                            result_cache_dirty = True
 
                         if EMIT_LIVE_CURVE_POINTS:
                             for delta in result.deltas:
@@ -427,11 +465,6 @@ class PolymarketProfitAnalyzer:
 
             return report
         finally:
-            if result_cache_dirty:
-                try:
-                    self._market_result_cache.save(req.address, address_market_cache)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("market result cache save failed address={} error={}", req.address, exc)
             await client.aclose()
 
     async def _fetch_markets_with_status(
@@ -479,27 +512,10 @@ class PolymarketProfitAnalyzer:
         client: PolymarketApiClient,
         engine: ProfitEngine,
         engine_no_fee: ProfitEngine,
-        address: str,
-        address_market_cache: dict[str, dict],
         req: AnalysisRequest,
         market,
+        fee_rate_bps_cache: dict[str, float],
     ) -> _MarketProcessResult:
-        now_ts = int(datetime.now(timezone.utc).timestamp())
-        use_result_cache = _is_market_result_cache_eligible(
-            market.slug,
-            now_ts=now_ts,
-            recent_window_sec=MARKET_RESULT_CACHE_RECENT_WINDOW_SEC,
-        )
-
-        if use_result_cache:
-            cached_payload = address_market_cache.get(market.slug)
-            if cached_payload is not None:
-                cached_result = _result_from_cache_payload(market.slug, cached_payload)
-                if cached_result is not None:
-                    logger.debug("market result cache hit address={} slug={}", address, market.slug)
-                    return cached_result
-                logger.warning("market result cache invalid address={} slug={}", address, market.slug)
-
         taker_trades, all_trades, split_acts, redeem_acts = await asyncio.gather(
             client.get_trades(req.address, market.condition_id, True, req.page_limit),
             client.get_trades(req.address, market.condition_id, False, req.page_limit),
@@ -507,22 +523,34 @@ class PolymarketProfitAnalyzer:
             client.get_activity(req.address, market.condition_id, "REDEEM", req.page_limit),
         )
 
+        fee_rate_bps_by_token, fee_warnings = await self._resolve_market_fee_rate_bps_by_token(
+            client=client,
+            market=market,
+            fallback_fee_rate_bps=req.fee_rate_bps,
+            fee_rate_bps_cache=fee_rate_bps_cache,
+        )
+        maker_reward_ratio = _maker_reward_ratio_for_market_category(market.category, default=req.maker_reward_ratio)
+
         replay = engine.analyze_market(
             market=market,
             taker_trades=taker_trades,
             all_trades=all_trades,
             split_activities=split_acts,
             redeem_activities=redeem_acts,
+            fee_rate_bps_by_token=fee_rate_bps_by_token,
+            maker_reward_ratio_override=maker_reward_ratio,
         )
         market_report = replay.report
         deltas = replay.deltas
-        warnings = replay.warnings
+        warnings = [*replay.warnings, *fee_warnings]
         market_report_no_fee, deltas_no_fee, _ = engine_no_fee.process_market(
             market=market,
             taker_trades=taker_trades,
             all_trades=all_trades,
             split_activities=split_acts,
             redeem_activities=redeem_acts,
+            fee_rate_bps_by_token=fee_rate_bps_by_token,
+            maker_reward_ratio_override=maker_reward_ratio,
         )
         scatter_point = None
         if _has_market_trade_activity(market_report):
@@ -544,12 +572,66 @@ class PolymarketProfitAnalyzer:
             side_session_diagnostics=replay.side_session_diagnostics,
             scatter_point=scatter_point,
         )
-        if use_result_cache:
-            new_payload = _result_to_cache_payload(result)
-            if address_market_cache.get(market.slug) != new_payload:
-                address_market_cache[market.slug] = new_payload
-                result.cache_updated = True
         return result
+
+    async def _resolve_market_fee_rate_bps_by_token(
+        self,
+        client: PolymarketApiClient,
+        market: PolymarketMarket,
+        fallback_fee_rate_bps: float,
+        fee_rate_bps_cache: dict[str, float],
+    ) -> tuple[dict[str, float], list[WarningItem]]:
+        if market.fees_enabled is False:
+            return {market.up_token_id: 0.0, market.down_token_id: 0.0}, []
+
+        warnings: list[WarningItem] = []
+        category_default_bps = _taker_fee_rate_bps_for_market_category(market.category)
+        rates: dict[str, float] = {}
+        for token_id in (market.up_token_id, market.down_token_id):
+            if token_id in fee_rate_bps_cache:
+                rates[token_id] = fee_rate_bps_cache[token_id]
+                continue
+            try:
+                fetched = await client.get_fee_rate_bps(token_id)
+            except Exception as exc:  # noqa: BLE001
+                fetched = None
+                warnings.append(
+                    WarningItem(
+                        market_slug=market.slug,
+                        token_id=token_id,
+                        code="FEE_RATE_FETCH_FAILED",
+                        message=f"fee-rate lookup failed; fallback is used ({exc})",
+                    )
+                )
+            # Fallback always uses current documented Crypto taker fee rate.
+            fallback_rate_bps = DEFAULT_FALLBACK_FEE_RATE_BPS
+            rate = fallback_rate_bps
+            if fetched is not None:
+                normalized = _normalize_fee_rate_bps(float(fetched), category_default_bps)
+                rate = normalized
+                if abs(normalized - float(fetched)) > 1e-9:
+                    warnings.append(
+                        WarningItem(
+                            market_slug=market.slug,
+                            token_id=token_id,
+                            code="FEE_RATE_NORMALIZED",
+                            message=(
+                                f"fee-rate endpoint value {float(fetched)} normalized to {normalized}"
+                            ),
+                        )
+                    )
+            else:
+                warnings.append(
+                    WarningItem(
+                        market_slug=market.slug,
+                        token_id=token_id,
+                        code="FEE_RATE_FALLBACK",
+                        message=f"fee-rate endpoint unavailable; fallback fee_rate_bps={fallback_rate_bps}",
+                    )
+                )
+            rates[token_id] = max(0.0, rate)
+            fee_rate_bps_cache[token_id] = rates[token_id]
+        return rates, warnings
 
     def save_json(self, report: AnalysisReport, path: str | None = None) -> str:
         output_dir = Path(report.request.output_dir)
@@ -618,6 +700,34 @@ def _build_hourly_pnl_buckets(deltas: list[PnlDelta]) -> list[float]:
         hour = datetime.fromtimestamp(int(delta.timestamp), tz=timezone.utc).hour
         buckets[hour] += float(delta.delta_pnl_usdc)
     return [round(v, 10) for v in buckets]
+
+
+def _maker_reward_ratio_for_market_category(category: str | None, default: float) -> float:
+    key = str(category or "").strip().lower()
+    if key in MARKET_CATEGORY_MAKER_REWARD_RATIO:
+        return float(MARKET_CATEGORY_MAKER_REWARD_RATIO[key])
+    return float(default)
+
+
+def _taker_fee_rate_bps_for_market_category(category: str | None) -> float | None:
+    key = str(category or "").strip().lower()
+    if key in MARKET_CATEGORY_TAKER_FEE_RATE_BPS:
+        return float(MARKET_CATEGORY_TAKER_FEE_RATE_BPS[key])
+    return None
+
+
+def _normalize_fee_rate_bps(raw_fee_rate_bps: float, category_default_bps: float | None) -> float:
+    raw = max(0.0, float(raw_fee_rate_bps))
+    if raw <= 1.0:
+        # Some endpoints may return rate (e.g. 0.072) instead of bps-like integer (72).
+        return raw * 1000.0
+    if raw <= 200.0:
+        return raw
+    # Large values (e.g. 1000 from order payload examples) are not usable directly
+    # in analyzer fee math; prefer documented category defaults when available.
+    if category_default_bps is not None:
+        return category_default_bps
+    return DEFAULT_FALLBACK_FEE_RATE_BPS
 
 
 def _compute_market_scatter_point(

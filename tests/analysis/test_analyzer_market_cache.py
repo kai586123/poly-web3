@@ -1,6 +1,11 @@
 import asyncio
 
-from analysis_poly.analyzer import PolymarketProfitAnalyzer, _market_order_key, _result_from_cache_payload
+from analysis_poly.analyzer import (
+    PolymarketProfitAnalyzer,
+    _market_order_key,
+    _normalize_fee_rate_bps,
+    _result_from_cache_payload,
+)
 from analysis_poly.market_cache import MarketMetadataCache
 from analysis_poly.models import PolymarketMarket
 
@@ -19,6 +24,11 @@ class _FakeClient:
             outcomes=["Up", "Down"],
             outcome_prices=[1.0, 0.0],
         )
+
+
+class _FailFeeRateClient:
+    async def get_fee_rate_bps(self, _token_id: str):
+        raise RuntimeError("fee endpoint down")
 
 
 def test_fetch_market_with_cache_uses_local_file(tmp_path):
@@ -79,3 +89,41 @@ def test_result_cache_payload_rejects_old_schema():
     }
 
     assert _result_from_cache_payload("btc-updown-5m-1000", payload) is None
+
+
+def test_fee_rate_fallback_uses_crypto_default():
+    async def runner():
+        analyzer = PolymarketProfitAnalyzer()
+        market = PolymarketMarket(
+            slug="btc-updown-5m-1000",
+            condition_id="cond_1",
+            up_token_id="up_token",
+            down_token_id="down_token",
+            outcomes=["Up", "Down"],
+            outcome_prices=[0.5, 0.5],
+            fees_enabled=True,
+        )
+        rates, warnings = await analyzer._resolve_market_fee_rate_bps_by_token(
+            client=_FailFeeRateClient(),
+            market=market,
+            fallback_fee_rate_bps=1000.0,
+            fee_rate_bps_cache={},
+        )
+
+        assert rates["up_token"] == 72.0
+        assert rates["down_token"] == 72.0
+        fallback_warnings = [w for w in warnings if w.code == "FEE_RATE_FALLBACK"]
+        assert len(fallback_warnings) == 2
+        assert all("fallback fee_rate_bps=72.0" in w.message for w in fallback_warnings)
+
+    asyncio.run(runner())
+
+
+def test_normalize_fee_rate_bps_uses_category_default_for_large_values():
+    assert _normalize_fee_rate_bps(1000.0, 72.0) == 72.0
+    assert _normalize_fee_rate_bps(1000.0, 40.0) == 40.0
+
+
+def test_normalize_fee_rate_bps_accepts_expected_ranges():
+    assert _normalize_fee_rate_bps(72.0, 40.0) == 72.0
+    assert _normalize_fee_rate_bps(0.072, 40.0) == 72.0

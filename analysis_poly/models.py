@@ -255,6 +255,8 @@ class PolymarketMarket(BaseModel):
     outcomes: list[str]
     outcome_prices: list[float]
     closed: bool = False
+    fees_enabled: bool | None = None
+    category: str | None = None
     outcome: str | None = None
 
 

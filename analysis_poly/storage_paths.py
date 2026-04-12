@@ -69,3 +69,8 @@ def default_market_metadata_cache_dir() -> Path:
 
 def default_market_result_cache_dir() -> Path:
     return (default_cache_root() / "address_market_results").resolve()
+
+
+def default_raw_api_cache_dir() -> Path:
+    """On-disk cache for raw Polymarket API responses (Gamma market, trades, activity, fee-rate)."""
+    return (default_cache_root() / "raw_api").resolve()

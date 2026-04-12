@@ -11,6 +11,8 @@ function StatusIcon({ runStatus }) {
 
 export default function StatusCard({ runStatus, latestWarning, summary, roi, winRate, progressPercent }) {
   const tone = sessionTone(runStatus);
+  const takerFeeCost = -Math.abs(Number(summary?.total_taker_fee_usdc || 0));
+  const makerReward = Number(summary?.total_maker_reward_usdc || 0);
 
   return (
     <section className="status-card">
@@ -39,6 +41,16 @@ export default function StatusCard({ runStatus, latestWarning, summary, roi, win
               <Col span={8}>
                 <div className="kpi-label">Win Rate</div>
                 <div className="kpi-value">{formatPct(winRate)}</div>
+              </Col>
+            </Row>
+            <Row gutter={[12, 8]}>
+              <Col span={12} className="kpi-divider">
+                <div className="kpi-label">Taker Fee (Cost)</div>
+                <div className="kpi-value kpi-value-secondary">{formatUsd(takerFeeCost)}</div>
+              </Col>
+              <Col span={12}>
+                <div className="kpi-label">Maker Reward</div>
+                <div className="kpi-value kpi-value-secondary">{formatUsd(makerReward)}</div>
               </Col>
             </Row>
             <Progress percent={progressPercent} showInfo={false} size="small" strokeColor="#2ca7b4" />

@@ -1,14 +1,91 @@
 from datetime import datetime, timezone
 
+import pytest
+
 from analysis_poly.models import ActivityRecord, PolymarketMarket, TradeRecord
-from analysis_poly.profit_engine import ProfitEngine, _fee_adjust
+from analysis_poly.profit_engine import ProfitEngine, _fee_adjust, _trade_key
 
 
 def test_fee_adjust_basic():
-    adjusted, fee_token, fee_usdc = _fee_adjust(100.0, 0.5, 1000)
+    adjusted, fee_token, fee_usdc = _fee_adjust(100.0, 0.5, 72)
     assert adjusted < 100.0
-    assert fee_token == 100.0 - adjusted
+    assert fee_token == pytest.approx(100.0 - adjusted)
     assert fee_usdc == fee_token * 0.5
+    assert fee_usdc == 1.8
+
+
+def test_fee_adjust_matches_doc_symmetry():
+    _, _, low = _fee_adjust(100.0, 0.30, 72)
+    _, _, high = _fee_adjust(100.0, 0.70, 72)
+    assert low == high
+
+
+def test_trade_key_rounds_floats_so_taker_endpoints_can_match():
+    """takerOnly=true and takerOnly=false are separate requests; JSON floats may differ slightly."""
+    a = TradeRecord.model_validate(
+        {
+            "transactionHash": "0xab",
+            "timestamp": 1,
+            "side": "BUY",
+            "asset": "tok",
+            "conditionId": "0x" + "c" * 64,
+            "size": 10,
+            "price": 0.5,
+        }
+    )
+    b = TradeRecord.model_validate(
+        {
+            "transactionHash": "0xab",
+            "timestamp": 1,
+            "side": "BUY",
+            "asset": "tok",
+            "conditionId": "0x" + "c" * 64,
+            "size": 10.0000000000004,
+            "price": 0.50000000000006,
+        }
+    )
+    assert _trade_key(a) == _trade_key(b)
+
+
+def test_duplicate_trade_rows_not_double_counted():
+    market = PolymarketMarket(
+        slug="btc-updown-5m-1000",
+        condition_id="cond_d",
+        up_token_id="up_token",
+        down_token_id="down_token",
+        outcomes=["Up", "Down"],
+        outcome_prices=[0.5, 0.5],
+    )
+    taker_buy = TradeRecord.model_validate(
+        {
+            "transactionHash": "0x01",
+            "timestamp": 1000,
+            "side": "BUY",
+            "asset": "up_token",
+            "conditionId": "cond_d",
+            "size": 10,
+            "price": 0.5,
+        }
+    )
+    engine = ProfitEngine(fee_rate_bps=72, maker_reward_ratio=0.2, missing_cost_warn_qty=0.5)
+    once, _, _ = engine.process_market(
+        market=market,
+        taker_trades=[taker_buy],
+        all_trades=[taker_buy],
+        split_activities=[],
+        redeem_activities=[],
+    )
+    dup, _, _ = engine.process_market(
+        market=market,
+        taker_trades=[taker_buy],
+        all_trades=[taker_buy, taker_buy],
+        split_activities=[],
+        redeem_activities=[],
+    )
+    up_once = next(t for t in once.tokens if t.token_id == "up_token")
+    up_dup = next(t for t in dup.tokens if t.token_id == "up_token")
+    assert up_dup.buy_qty == up_once.buy_qty
+    assert up_dup.taker_fee_usdc == up_once.taker_fee_usdc
 
 
 def test_profit_engine_taker_buy_sell_and_redeem_warning():
@@ -54,7 +131,7 @@ def test_profit_engine_taker_buy_sell_and_redeem_warning():
         }
     )
 
-    engine = ProfitEngine(fee_rate_bps=1000, maker_reward_ratio=0.2, missing_cost_warn_qty=0.5)
+    engine = ProfitEngine(fee_rate_bps=72, maker_reward_ratio=0.2, missing_cost_warn_qty=0.5)
     report, deltas, warnings = engine.process_market(
         market=market,
         taker_trades=[taker_buy, taker_sell],
@@ -91,7 +168,7 @@ def test_profit_engine_marks_yes_no_side_and_market_outcome_labels():
         }
     )
 
-    engine = ProfitEngine(fee_rate_bps=1000, maker_reward_ratio=0.2, missing_cost_warn_qty=0.5)
+    engine = ProfitEngine(fee_rate_bps=72, maker_reward_ratio=0.2, missing_cost_warn_qty=0.5)
     report, _, _ = engine.process_market(
         market=market,
         taker_trades=[taker_buy],
@@ -130,7 +207,7 @@ def test_profit_engine_split_allocation():
         }
     )
 
-    engine = ProfitEngine(fee_rate_bps=1000, maker_reward_ratio=0.2, missing_cost_warn_qty=0.5)
+    engine = ProfitEngine(fee_rate_bps=72, maker_reward_ratio=0.2, missing_cost_warn_qty=0.5)
     report, _, _ = engine.process_market(
         market=market,
         taker_trades=[],
@@ -213,6 +290,106 @@ def test_maker_reward_skipped_for_today_market_and_kept_for_history():
     assert hist_report.maker_reward_usdc > 0
 
 
+def test_maker_rebate_uses_trade_utc_day_not_slug():
+    """Rebate eligibility follows fill timestamp (daily USDC settlement), not slug suffix."""
+    day_start = int(
+        datetime.now(timezone.utc)
+        .replace(hour=0, minute=0, second=0, microsecond=0)
+        .timestamp()
+    )
+    # Slug suffix looks like "today's" window, but fill is yesterday UTC → rebate accrues.
+    market = PolymarketMarket(
+        slug=f"btc-updown-5m-{day_start + 300}",
+        condition_id="cond",
+        up_token_id="up",
+        down_token_id="down",
+        outcomes=["Up", "Down"],
+        outcome_prices=[0.5, 0.5],
+    )
+    maker_buy = TradeRecord.model_validate(
+        {
+            "transactionHash": "0xmaker_hist",
+            "timestamp": day_start - 200,
+            "side": "BUY",
+            "asset": "up",
+            "conditionId": "cond",
+            "size": 100,
+            "price": 0.5,
+        }
+    )
+    engine = ProfitEngine(fee_rate_bps=1000, maker_reward_ratio=0.2, missing_cost_warn_qty=0.5)
+    report, _, warnings = engine.process_market(
+        market=market,
+        taker_trades=[],
+        all_trades=[maker_buy],
+        split_activities=[],
+        redeem_activities=[],
+    )
+    assert report.maker_reward_usdc > 0
+    assert not any(w.code == "MAKER_REWARD_DEFERRED_TODAY" for w in warnings)
+
+
+def test_engine_can_disable_maker_reward_in_no_fee_mode():
+    day_start = int(
+        datetime.now(timezone.utc)
+        .replace(hour=0, minute=0, second=0, microsecond=0)
+        .timestamp()
+    )
+    market = PolymarketMarket(
+        slug=f"btc-updown-5m-{day_start - 300}",
+        condition_id="hist_cond",
+        up_token_id="up_hist",
+        down_token_id="down_hist",
+        outcomes=["Up", "Down"],
+        outcome_prices=[0.5, 0.5],
+    )
+    maker_buy = TradeRecord.model_validate(
+        {
+            "transactionHash": "0xmaker_hist_no_fee",
+            "timestamp": day_start - 200,
+            "side": "BUY",
+            "asset": "up_hist",
+            "conditionId": "hist_cond",
+            "size": 100,
+            "price": 0.5,
+        }
+    )
+
+    net_engine = ProfitEngine(
+        fee_rate_bps=72,
+        maker_reward_ratio=0.2,
+        missing_cost_warn_qty=0.5,
+        charge_taker_fee=True,
+        apply_maker_reward=True,
+    )
+    no_fee_engine = ProfitEngine(
+        fee_rate_bps=72,
+        maker_reward_ratio=0.2,
+        missing_cost_warn_qty=0.5,
+        charge_taker_fee=False,
+        apply_maker_reward=False,
+    )
+
+    net_report, _, _ = net_engine.process_market(
+        market=market,
+        taker_trades=[],
+        all_trades=[maker_buy],
+        split_activities=[],
+        redeem_activities=[],
+    )
+    no_fee_report, _, _ = no_fee_engine.process_market(
+        market=market,
+        taker_trades=[],
+        all_trades=[maker_buy],
+        split_activities=[],
+        redeem_activities=[],
+    )
+
+    assert net_report.maker_reward_usdc > 0
+    assert no_fee_report.maker_reward_usdc == 0
+    assert net_report.realized_pnl_usdc > no_fee_report.realized_pnl_usdc
+
+
 def test_closed_market_without_redeem_settles_remaining_position_by_outcome_prices():
     market = PolymarketMarket(
         slug="btc-updown-5m-3000",
@@ -236,7 +413,7 @@ def test_closed_market_without_redeem_settles_remaining_position_by_outcome_pric
         }
     )
 
-    engine = ProfitEngine(fee_rate_bps=1000, maker_reward_ratio=0.2, missing_cost_warn_qty=0.5)
+    engine = ProfitEngine(fee_rate_bps=72, maker_reward_ratio=0.2, missing_cost_warn_qty=0.5)
     report, _, warnings = engine.process_market(
         market=market,
         taker_trades=[taker_buy],
