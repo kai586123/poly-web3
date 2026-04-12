@@ -5,6 +5,7 @@ import dayjs from "dayjs";
 import { formatPct, formatUsd } from "../utils/format";
 
 const EPS = 1e-12;
+const MAX_RENDER_POINTS = 1000;
 
 function mean(values) {
   if (!values.length) return 0;
@@ -129,11 +130,32 @@ function fmtStat(value, type = "number") {
   return Number(value).toFixed(3);
 }
 
+function sampleSeries(points, maxPoints = MAX_RENDER_POINTS) {
+  const list = Array.isArray(points) ? points : [];
+  const n = list.length;
+  if (n <= maxPoints) return list;
+  const sampled = [];
+  let prevIdx = -1;
+  for (let i = 0; i < maxPoints; i += 1) {
+    const idx = Math.floor((i * (n - 1)) / (maxPoints - 1));
+    if (idx !== prevIdx) {
+      sampled.push(list[idx]);
+      prevIdx = idx;
+    }
+  }
+  if (sampled[sampled.length - 1] !== list[n - 1]) {
+    sampled.push(list[n - 1]);
+  }
+  return sampled;
+}
+
 export default function QuantMetricsPanel({ totalSeries, totalSeriesNoFee, markets }) {
   const metrics = useMemo(() => quantMetrics(totalSeries, totalSeriesNoFee, markets), [totalSeries, totalSeriesNoFee, markets]);
 
   const rollSharpe = useMemo(() => rollingSharpePoints(metrics.deltas, 30), [metrics.deltas]);
   const hist = useMemo(() => histogram(metrics.deltaVals, 24), [metrics.deltaVals]);
+  const drawdownSeriesForChart = useMemo(() => sampleSeries(metrics.drawdownSeries), [metrics.drawdownSeries]);
+  const rollSharpeForChart = useMemo(() => sampleSeries(rollSharpe), [rollSharpe]);
 
   const drawdownOption = useMemo(
     () => ({
@@ -150,7 +172,7 @@ export default function QuantMetricsPanel({ totalSeries, totalSeriesNoFee, marke
       xAxis: {
         type: "category",
         boundaryGap: false,
-        data: metrics.drawdownSeries.map((p) => p.ts),
+        data: drawdownSeriesForChart.map((p) => p.ts),
         axisLabel: { color: "#607089", formatter: fmtTs, hideOverlap: true },
       },
       yAxis: {
@@ -166,11 +188,11 @@ export default function QuantMetricsPanel({ totalSeries, totalSeriesNoFee, marke
           showSymbol: false,
           lineStyle: { color: "#e05757", width: 2.2 },
           areaStyle: { color: "rgba(224,87,87,0.15)" },
-          data: metrics.drawdownSeries.map((p) => p.value),
+          data: drawdownSeriesForChart.map((p) => p.value),
         },
       ],
     }),
-    [metrics.drawdownSeries],
+    [drawdownSeriesForChart],
   );
 
   const histOption = useMemo(
@@ -217,7 +239,7 @@ export default function QuantMetricsPanel({ totalSeries, totalSeriesNoFee, marke
       xAxis: {
         type: "category",
         boundaryGap: false,
-        data: rollSharpe.map((p) => p.ts),
+        data: rollSharpeForChart.map((p) => p.ts),
         axisLabel: { color: "#607089", formatter: fmtTs, hideOverlap: true },
       },
       yAxis: {
@@ -231,11 +253,11 @@ export default function QuantMetricsPanel({ totalSeries, totalSeriesNoFee, marke
           smooth: 0.2,
           showSymbol: false,
           lineStyle: { color: "#2ea66d", width: 2.3 },
-          data: rollSharpe.map((p) => p.value),
+          data: rollSharpeForChart.map((p) => p.value),
         },
       ],
     }),
-    [rollSharpe],
+    [rollSharpeForChart],
   );
 
   return (

@@ -21,6 +21,10 @@ from .models import (
     utc_now,
 )
 
+UI_MAX_TOTAL_CURVE_POINTS = 1200
+UI_MAX_SIDE_CURVE_POINTS = 1200
+UI_MAX_MARKET_CURVE_POINTS = 240
+
 
 @dataclass
 class RunContext:
@@ -179,7 +183,7 @@ class RunManager:
 
         if not ctx.result:
             raise HTTPException(status_code=202, detail="run not finished")
-        return ctx.result
+        return _compact_report_for_ui(ctx.result)
 
     async def get_state(self, run_id: str) -> RunState:
         ctx = self._runs.get(run_id)
@@ -287,3 +291,39 @@ class RunManager:
             filename = Path(path).name
             public[key] = f"/reports/{filename}"
         return public
+
+
+def _sample_points_evenly(points: list, max_points: int) -> list:
+    if max_points <= 0 or len(points) <= max_points:
+        return points
+    n = len(points)
+    sampled: list = []
+    prev_idx = -1
+    for i in range(max_points):
+        idx = int((i * (n - 1)) / (max_points - 1))
+        if idx != prev_idx:
+            sampled.append(points[idx])
+            prev_idx = idx
+    if sampled[-1] is not points[-1]:
+        sampled.append(points[-1])
+    return sampled
+
+
+def _sample_curve_dict(curves: dict[str, list], max_points: int) -> dict[str, list]:
+    sampled: dict[str, list] = {}
+    for key, points in curves.items():
+        sampled[key] = _sample_points_evenly(points, max_points)
+    return sampled
+
+
+def _compact_report_for_ui(report: AnalysisReport) -> AnalysisReport:
+    return report.model_copy(
+        update={
+            "total_curve": _sample_points_evenly(report.total_curve, UI_MAX_TOTAL_CURVE_POINTS),
+            "total_curve_no_fee": _sample_points_evenly(report.total_curve_no_fee, UI_MAX_TOTAL_CURVE_POINTS),
+            "side_curves": _sample_curve_dict(report.side_curves, UI_MAX_SIDE_CURVE_POINTS),
+            "side_curves_no_fee": _sample_curve_dict(report.side_curves_no_fee, UI_MAX_SIDE_CURVE_POINTS),
+            "market_curves": _sample_curve_dict(report.market_curves, UI_MAX_MARKET_CURVE_POINTS),
+            "market_curves_no_fee": _sample_curve_dict(report.market_curves_no_fee, UI_MAX_MARKET_CURVE_POINTS),
+        }
+    )

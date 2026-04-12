@@ -130,6 +130,28 @@ const SIDE_META = {
   },
 };
 
+const MAX_RENDER_POINTS = 1000;
+
+function sampleSortedTimestamps(timestamps, maxPoints = MAX_RENDER_POINTS) {
+  const n = Array.isArray(timestamps) ? timestamps.length : 0;
+  if (n <= maxPoints) {
+    return timestamps || [];
+  }
+  const sampled = [];
+  let prevIdx = -1;
+  for (let i = 0; i < maxPoints; i += 1) {
+    const idx = Math.floor((i * (n - 1)) / (maxPoints - 1));
+    if (idx !== prevIdx) {
+      sampled.push(timestamps[idx]);
+      prevIdx = idx;
+    }
+  }
+  if (sampled[sampled.length - 1] !== timestamps[n - 1]) {
+    sampled.push(timestamps[n - 1]);
+  }
+  return sampled;
+}
+
 export default function PnlCharts({
   totalSeries,
   totalSeriesNoFee,
@@ -152,7 +174,7 @@ export default function PnlCharts({
     const noNetSideMap = seriesMap(sideSeries?.NO || []);
     const yesNoFeeMap = seriesMap(sideSeriesNoFee?.YES || []);
     const noNoFeeSideMap = seriesMap(sideSeriesNoFee?.NO || []);
-    const xData = unionSortedTimestamps(
+    const fullXData = unionSortedTimestamps(
       showNet ? netMap : new Map(),
       showNoFee ? noFeeMap : new Map(),
       showNet ? yesNetMap : new Map(),
@@ -160,6 +182,7 @@ export default function PnlCharts({
       showNoFee ? yesNoFeeMap : new Map(),
       showNoFee ? noNoFeeSideMap : new Map(),
     );
+    const xData = sampleSortedTimestamps(fullXData);
 
     const series = [];
     const drawdownByTs = new Map();
@@ -437,7 +460,8 @@ export default function PnlCharts({
         noFeeMap.forEach((_value, ts) => allTsSet.add(ts));
       }
     });
-    const xData = [...allTsSet].sort((a, b) => a - b);
+    const fullXData = [...allTsSet].sort((a, b) => a - b);
+    const xData = sampleSortedTimestamps(fullXData);
 
     const series = [];
     const drawdownByTs = new Map();

@@ -38,6 +38,7 @@ MARKET_FETCH_CONCURRENCY_DEFAULT = 10
 MARKET_TIMESTAMP_CHUNK_SIZE_DEFAULT = 20
 MARKET_RESULT_CACHE_RECENT_WINDOW_SEC = 30 * 60
 MARKET_RESULT_CACHE_SCHEMA_VERSION = 2
+EMIT_LIVE_CURVE_POINTS = False
 SESSION_PRICE_BIN_WIDTH = 0.01
 SESSION_PRICE_BIN_COUNT = 100
 SESSION_PEAK_NOTIONAL_BIN_WIDTH = 10.0
@@ -153,10 +154,10 @@ class PolymarketProfitAnalyzer:
         side_deltas: dict[str, list[PnlDelta]] = defaultdict(list)
         side_deltas_no_fee: dict[str, list[PnlDelta]] = defaultdict(list)
 
-        total_by_ts: dict[int, float] = defaultdict(float)
-        market_by_ts: dict[str, dict[int, float]] = defaultdict(lambda: defaultdict(float))
-        total_by_ts_no_fee: dict[int, float] = defaultdict(float)
-        market_by_ts_no_fee: dict[str, dict[int, float]] = defaultdict(lambda: defaultdict(float))
+        total_running_pnl = 0.0
+        total_running_pnl_no_fee = 0.0
+        market_running_pnl: dict[str, float] = defaultdict(float)
+        market_running_pnl_no_fee: dict[str, float] = defaultdict(float)
         address_market_cache = self._market_result_cache.load(req.address)
         result_cache_dirty = False
 
@@ -285,45 +286,36 @@ class PolymarketProfitAnalyzer:
                         if result.cache_updated:
                             result_cache_dirty = True
 
-                        for delta in result.deltas:
-                            total_by_ts[delta.timestamp] += delta.delta_pnl_usdc
-                            market_by_ts[delta.market_slug][delta.timestamp] += delta.delta_pnl_usdc
+                        if EMIT_LIVE_CURVE_POINTS:
+                            for delta in result.deltas:
+                                total_running_pnl += delta.delta_pnl_usdc
+                                market_running_pnl[delta.market_slug] += delta.delta_pnl_usdc
+                                await hooks.on_total_point(
+                                    delta.timestamp,
+                                    delta.delta_pnl_usdc,
+                                    total_running_pnl,
+                                )
+                                await hooks.on_market_point(
+                                    delta.market_slug,
+                                    delta.timestamp,
+                                    delta.delta_pnl_usdc,
+                                    market_running_pnl[delta.market_slug],
+                                )
 
-                            total_cumulative = _cumulative_at(total_by_ts, delta.timestamp)
-                            market_cumulative = _cumulative_at(market_by_ts[delta.market_slug], delta.timestamp)
-
-                            await hooks.on_total_point(
-                                delta.timestamp,
-                                delta.delta_pnl_usdc,
-                                total_cumulative,
-                            )
-                            await hooks.on_market_point(
-                                delta.market_slug,
-                                delta.timestamp,
-                                delta.delta_pnl_usdc,
-                                market_cumulative,
-                            )
-
-                        for delta in result.deltas_no_fee:
-                            total_by_ts_no_fee[delta.timestamp] += delta.delta_pnl_usdc
-                            market_by_ts_no_fee[delta.market_slug][delta.timestamp] += delta.delta_pnl_usdc
-
-                            total_cumulative_no_fee = _cumulative_at(total_by_ts_no_fee, delta.timestamp)
-                            market_cumulative_no_fee = _cumulative_at(
-                                market_by_ts_no_fee[delta.market_slug], delta.timestamp
-                            )
-
-                            await hooks.on_total_point_no_fee(
-                                delta.timestamp,
-                                delta.delta_pnl_usdc,
-                                total_cumulative_no_fee,
-                            )
-                            await hooks.on_market_point_no_fee(
-                                delta.market_slug,
-                                delta.timestamp,
-                                delta.delta_pnl_usdc,
-                                market_cumulative_no_fee,
-                            )
+                            for delta in result.deltas_no_fee:
+                                total_running_pnl_no_fee += delta.delta_pnl_usdc
+                                market_running_pnl_no_fee[delta.market_slug] += delta.delta_pnl_usdc
+                                await hooks.on_total_point_no_fee(
+                                    delta.timestamp,
+                                    delta.delta_pnl_usdc,
+                                    total_running_pnl_no_fee,
+                                )
+                                await hooks.on_market_point_no_fee(
+                                    delta.market_slug,
+                                    delta.timestamp,
+                                    delta.delta_pnl_usdc,
+                                    market_running_pnl_no_fee[delta.market_slug],
+                                )
 
                         await hooks.on_progress(processed_count, total_markets, result.market_slug)
 
@@ -859,15 +851,6 @@ def _session_win_score(session: TradeSession) -> float:
     if return_pct is not None and float(return_pct) < -1e-9:
         return 0.0
     return 0.5
-
-
-def _cumulative_at(by_ts: dict[int, float], ts: int) -> float:
-    cumulative = 0.0
-    for key in sorted(by_ts.keys()):
-        if key > ts:
-            break
-        cumulative += by_ts[key]
-    return cumulative
 
 
 def _market_order_key(slug: str) -> tuple[int, str]:

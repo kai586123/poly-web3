@@ -11,9 +11,10 @@ import { buildDefaultForm, EMPTY_SUMMARY } from "./constants";
 import { createRun, fetchRunResult, stopRun } from "./services/api";
 import { parseDateTimeTextToUnixSeconds, toDateTimeText } from "./utils/dateTime";
 
-const IDLE_WARNING = "No warnings. Strategy is running with live market aggregation.";
+const IDLE_WARNING = "No warnings. Curves are rendered after run completion for stability.";
 const MAX_DRAWDOWN_MARKERS = 8;
 const MIN_DRAWDOWN_DELTA_USDC = 0.5;
+const ENABLE_LIVE_CURVE_STREAM = false;
 
 function extractMarketPrefix(marketSlug) {
   const raw = String(marketSlug || "").trim().toLowerCase();
@@ -34,10 +35,19 @@ function extractMarketPrefix(marketSlug) {
 }
 
 function reduceCurveDelta(points) {
+  const sorted = [...(points || [])]
+    .map((point) => ({
+      ts: Number(point.timestamp || 0),
+      cumulative: Number(point.cumulative_realized_pnl_usdc || 0),
+    }))
+    .sort((a, b) => a.ts - b.ts);
   const byTs = new Map();
-  for (const point of points || []) {
-    const ts = Number(point.timestamp || 0);
-    const delta = Number(point.delta_realized_pnl_usdc || 0);
+  let prevCumulative = 0;
+  for (let idx = 0; idx < sorted.length; idx += 1) {
+    const point = sorted[idx];
+    const ts = point.ts;
+    const delta = idx === 0 ? point.cumulative : point.cumulative - prevCumulative;
+    prevCumulative = point.cumulative;
     byTs.set(ts, (byTs.get(ts) || 0) + delta);
   }
   return byTs;
@@ -540,25 +550,27 @@ export default function App({ serverDefaults }) {
       pushWarning(`${data.code}: ${data.message}`);
     });
 
-    stream.addEventListener("point_total", (event) => {
-      const data = JSON.parse(event.data || "{}");
-      appendTotalDelta(data.timestamp, data.delta_realized_pnl_usdc);
-    });
+    if (ENABLE_LIVE_CURVE_STREAM) {
+      stream.addEventListener("point_total", (event) => {
+        const data = JSON.parse(event.data || "{}");
+        appendTotalDelta(data.timestamp, data.delta_realized_pnl_usdc);
+      });
 
-    stream.addEventListener("point_market", (event) => {
-      const data = JSON.parse(event.data || "{}");
-      appendSymbolDelta(extractMarketPrefix(data.market_slug), data.timestamp, data.delta_realized_pnl_usdc);
-    });
+      stream.addEventListener("point_market", (event) => {
+        const data = JSON.parse(event.data || "{}");
+        appendSymbolDelta(extractMarketPrefix(data.market_slug), data.timestamp, data.delta_realized_pnl_usdc);
+      });
 
-    stream.addEventListener("point_total_no_fee", (event) => {
-      const data = JSON.parse(event.data || "{}");
-      appendTotalDeltaNoFee(data.timestamp, data.delta_realized_pnl_usdc);
-    });
+      stream.addEventListener("point_total_no_fee", (event) => {
+        const data = JSON.parse(event.data || "{}");
+        appendTotalDeltaNoFee(data.timestamp, data.delta_realized_pnl_usdc);
+      });
 
-    stream.addEventListener("point_market_no_fee", (event) => {
-      const data = JSON.parse(event.data || "{}");
-      appendSymbolDeltaNoFee(extractMarketPrefix(data.market_slug), data.timestamp, data.delta_realized_pnl_usdc);
-    });
+      stream.addEventListener("point_market_no_fee", (event) => {
+        const data = JSON.parse(event.data || "{}");
+        appendSymbolDeltaNoFee(extractMarketPrefix(data.market_slug), data.timestamp, data.delta_realized_pnl_usdc);
+      });
+    }
 
     stream.addEventListener("completed", async () => {
       setRunStatus("COMPLETED");
