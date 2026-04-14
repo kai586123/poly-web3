@@ -1,7 +1,7 @@
 {
   "name": "poly-web3-ui",
   "private": true,
-  "version": "1.2.4",
+  "version": "1.2.5",
   "scripts": {
     "build": "esbuild frontend/src/main.jsx --bundle --format=esm --target=es2020 --outfile=analysis_poly/static/dist/app.js --jsx=automatic --loader:.jsx=jsx --minify"
   },

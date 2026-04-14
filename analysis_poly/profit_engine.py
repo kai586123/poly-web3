@@ -25,6 +25,15 @@ class PnlDelta:
 
 
 @dataclass
+class TurnoverDelta:
+    """Per TRADE fill: gross notional size * price (USDC) for analytics."""
+
+    timestamp: int
+    market_slug: str
+    delta_turnover_usdc: float
+
+
+@dataclass
 class _Lot:
     qty: float
     cost_per_qty: float
@@ -66,6 +75,14 @@ class _Event:
 
 
 @dataclass
+class _PairLeg:
+    timestamp: int
+    tx: str
+    qty: float
+    price: float
+
+
+@dataclass
 class _SessionAccumulator:
     market_slug: str
     start_timestamp: int
@@ -86,6 +103,7 @@ class _SessionAccumulator:
 class MarketReplayResult:
     report: MarketReport
     deltas: list[PnlDelta]
+    turnover_deltas: list[TurnoverDelta]
     warnings: list[WarningItem]
     trade_sessions: list[TradeSession]
     session_diagnostics: SessionAnalyticsDiagnostics
@@ -188,25 +206,19 @@ class ProfitEngine:
         events.sort(key=lambda e: (e.timestamp, e.tx, _event_priority(e.kind)))
 
         pnl_deltas: list[PnlDelta] = []
-        trade_sessions: list[TradeSession] = []
-        session_diagnostics = SessionAnalyticsDiagnostics()
-        active_session: _SessionAccumulator | None = None
-        side_trade_sessions: dict[str, list[TradeSession]] = {"YES": [], "NO": []}
-        side_session_diagnostics: dict[str, SessionAnalyticsDiagnostics] = {
-            "YES": SessionAnalyticsDiagnostics(),
-            "NO": SessionAnalyticsDiagnostics(),
-        }
-        side_active_sessions: dict[str, _SessionAccumulator | None] = {
-            market.up_token_id: None,
-            market.down_token_id: None,
-        }
+        turnover_deltas: list[TurnoverDelta] = []
         for event in events:
-            was_flat = _is_market_flat(token_states)
             event_deltas: list[PnlDelta] = []
             event_warnings: list[WarningItem] = []
             if event.kind == "TRADE" and event.token_id in token_states:
+                turnover_deltas.append(
+                    TurnoverDelta(
+                        timestamp=event.timestamp,
+                        market_slug=market.slug,
+                        delta_turnover_usdc=float(event.size) * float(event.price),
+                    )
+                )
                 token_state = token_states[event.token_id]
-                token_was_flat = token_state.position_qty <= 1e-12
                 token_state.trade_count += 1
                 event_deltas, event_warnings = self._apply_trade(
                     market_slug=market.slug,
@@ -216,22 +228,9 @@ class ProfitEngine:
                     maker_rebate_category_enabled=maker_rebate_category_enabled,
                     maker_reward_ratio=maker_reward_ratio,
                 )
-                side_active_sessions[event.token_id] = _advance_side_session(
-                    market_slug=market.slug,
-                    token_state=token_state,
-                    active_session=side_active_sessions[event.token_id],
-                    event=event,
-                    event_deltas=event_deltas,
-                    event_warnings=event_warnings,
-                    was_flat=token_was_flat,
-                    side_trade_sessions=side_trade_sessions,
-                    side_session_diagnostics=side_session_diagnostics,
-                )
             elif event.kind == "SPLIT":
                 up_state = token_states[market.up_token_id]
                 down_state = token_states[market.down_token_id]
-                up_was_flat = up_state.position_qty <= 1e-12
-                down_was_flat = down_state.position_qty <= 1e-12
 
                 qty_each = event.size / 2.0
                 usdc_each = event.usdc_size / 2.0
@@ -240,31 +239,8 @@ class ProfitEngine:
                     down_state.lots.append(_Lot(qty=qty_each, cost_per_qty=usdc_each / qty_each))
                 up_state.split_qty += qty_each
                 down_state.split_qty += qty_each
-                for token_state, token_was_flat, token_id in (
-                    (up_state, up_was_flat, market.up_token_id),
-                    (down_state, down_was_flat, market.down_token_id),
-                ):
-                    side_event = _side_event_from_split_or_settlement(
-                        base_event=event,
-                        market=market,
-                        token_id=token_id,
-                        size=qty_each,
-                        usdc_size=usdc_each,
-                    )
-                    side_active_sessions[token_id] = _advance_side_session(
-                        market_slug=market.slug,
-                        token_state=token_state,
-                        active_session=side_active_sessions[token_id],
-                        event=side_event,
-                        event_deltas=[],
-                        event_warnings=[],
-                        was_flat=token_was_flat,
-                        side_trade_sessions=side_trade_sessions,
-                        side_session_diagnostics=side_session_diagnostics,
-                    )
             elif event.kind == "REDEEM" and event.token_id in token_states:
                 token_state = token_states[event.token_id]
-                token_was_flat = token_state.position_qty <= 1e-12
                 event_deltas, event_warnings = self._close_position(
                     market_slug=market.slug,
                     token_state=token_state,
@@ -274,35 +250,8 @@ class ProfitEngine:
                     missing_cost_warn_code="REDEEM_OVERSELL_ZERO_COST",
                 )
                 token_state.redeem_qty += event.size
-                side_active_sessions[event.token_id] = _advance_side_session(
-                    market_slug=market.slug,
-                    token_state=token_state,
-                    active_session=side_active_sessions[event.token_id],
-                    event=_enrich_event_with_side(event, market, event.token_id),
-                    event_deltas=event_deltas,
-                    event_warnings=event_warnings,
-                    was_flat=token_was_flat,
-                    side_trade_sessions=side_trade_sessions,
-                    side_session_diagnostics=side_session_diagnostics,
-                )
             pnl_deltas.extend(event_deltas)
             warnings.extend(event_warnings)
-
-            is_flat = _is_market_flat(token_states)
-            if was_flat and not is_flat and active_session is None:
-                active_session = _SessionAccumulator(market_slug=market.slug, start_timestamp=event.timestamp)
-            active_session = _record_session_event(active_session, event, event_deltas, event_warnings)
-            if active_session is not None:
-                inv = _inventory_cost_basis_usdc(token_states)
-                if inv > active_session.peak_position_notional_usdc:
-                    active_session.peak_position_notional_usdc = inv
-            if active_session is not None and is_flat:
-                session = _finalize_session(active_session, end_timestamp=event.timestamp)
-                trade_sessions.append(session)
-                session_diagnostics.total_detected_sessions += 1
-                session_diagnostics.closed_sessions += 1
-                _apply_session_diagnostic(session_diagnostics, session)
-                active_session = None
 
         settlement_event, settlement_side_events, settlement_deltas, settlement_warnings = self._settle_closed_market_positions(
             market=market,
@@ -311,43 +260,16 @@ class ProfitEngine:
         )
         pnl_deltas.extend(settlement_deltas)
         warnings.extend(settlement_warnings)
-        for side_event in settlement_side_events:
-            token_state = token_states.get(side_event.token_id or "")
-            if token_state is None:
-                continue
-            side_active_sessions[side_event.token_id] = _advance_side_session(
-                market_slug=market.slug,
-                token_state=token_state,
-                active_session=side_active_sessions[side_event.token_id],
-                event=side_event,
-                event_deltas=[delta for delta in settlement_deltas if delta.token_id == side_event.token_id],
-                event_warnings=[warning for warning in settlement_warnings if warning.token_id == side_event.token_id],
-                was_flat=False,
-                side_trade_sessions=side_trade_sessions,
-                side_session_diagnostics=side_session_diagnostics,
-            )
-        if settlement_event is not None:
-            active_session = _record_session_event(active_session, settlement_event, settlement_deltas, settlement_warnings)
-            if active_session is not None:
-                inv = _inventory_cost_basis_usdc(token_states)
-                if inv > active_session.peak_position_notional_usdc:
-                    active_session.peak_position_notional_usdc = inv
-            if active_session is not None and _is_market_flat(token_states):
-                session = _finalize_session(active_session, end_timestamp=settlement_event.timestamp)
-                trade_sessions.append(session)
-                session_diagnostics.total_detected_sessions += 1
-                session_diagnostics.closed_sessions += 1
-                _apply_session_diagnostic(session_diagnostics, session)
-                active_session = None
-
-        if active_session is not None:
-            session_diagnostics.total_detected_sessions += 1
-            session_diagnostics.excluded_open_session_count += 1
-        for token_id, side_session in side_active_sessions.items():
-            if side_session is not None:
-                side = token_states[token_id].side
-                side_session_diagnostics[side].total_detected_sessions += 1
-                side_session_diagnostics[side].excluded_open_session_count += 1
+        pair_events = sorted(
+            [*events, *settlement_side_events],
+            key=lambda e: (e.timestamp, e.tx, _event_priority(e.kind)),
+        )
+        trade_sessions, side_trade_sessions = _build_trade_pair_sessions(market, pair_events)
+        session_diagnostics = _pair_session_diagnostics(trade_sessions)
+        side_session_diagnostics = {
+            side: _pair_session_diagnostics(side_trade_sessions.get(side, []))
+            for side in ("YES", "NO")
+        }
 
         token_reports: list[TokenReport] = []
         for token_state in token_states.values():
@@ -386,6 +308,7 @@ class ProfitEngine:
         return MarketReplayResult(
             report=market_report,
             deltas=pnl_deltas,
+            turnover_deltas=turnover_deltas,
             warnings=warnings,
             trade_sessions=trade_sessions,
             session_diagnostics=session_diagnostics,
@@ -776,6 +699,276 @@ def _side_event_from_split_or_settlement(
     )
 
 
+def _build_trade_pair_sessions(
+    market: PolymarketMarket,
+    events: list[_Event],
+) -> tuple[list[TradeSession], dict[str, list[TradeSession]]]:
+    side_sessions = {
+        "YES": _build_side_trade_pair_sessions(
+            market_slug=market.slug,
+            token_id=market.up_token_id,
+            side="YES",
+            outcome=_market_outcome_label(market, 0, fallback="Yes"),
+            events=events,
+        ),
+        "NO": _build_side_trade_pair_sessions(
+            market_slug=market.slug,
+            token_id=market.down_token_id,
+            side="NO",
+            outcome=_market_outcome_label(market, 1, fallback="No"),
+            events=events,
+        ),
+    }
+    combined = sorted(
+        [*side_sessions["YES"], *side_sessions["NO"]],
+        key=lambda s: (s.start_timestamp, s.end_timestamp, s.entry_side or "", s.market_slug),
+    )
+    return combined, side_sessions
+
+
+def _build_side_trade_pair_sessions(
+    market_slug: str,
+    token_id: str,
+    side: str,
+    outcome: str,
+    events: list[_Event],
+) -> list[TradeSession]:
+    ordered_events = sorted(
+        [event for event in events if event.token_id == token_id],
+        key=lambda e: (e.timestamp, e.tx, _event_priority(e.kind)),
+    )
+    sessions: list[TradeSession] = []
+    buy_block: list[_PairLeg] = []
+    close_block: list[_PairLeg] = []
+    phase = "idle"
+
+    for event in ordered_events:
+        leg = _pair_leg_from_event(event)
+        if leg is None:
+            continue
+        if event.kind == "TRADE" and event.side == "BUY":
+            if phase in {"idle", "buy"}:
+                buy_block.append(leg)
+                phase = "buy"
+                continue
+            sessions.extend(
+                _emit_trade_pair_sessions(
+                    market_slug=market_slug,
+                    side=side,
+                    outcome=outcome,
+                    buy_block=buy_block,
+                    close_block=close_block,
+                    terminal=False,
+                )
+            )
+            buy_block = [leg]
+            close_block = []
+            phase = "buy"
+            continue
+
+        if not buy_block:
+            # Ignore sells/redeems/settlement before the first buy block on this side.
+            continue
+
+        close_block.append(leg)
+        phase = "close"
+
+    if buy_block:
+        sessions.extend(
+            _emit_trade_pair_sessions(
+                market_slug=market_slug,
+                side=side,
+                outcome=outcome,
+                buy_block=buy_block,
+                close_block=close_block,
+                terminal=True,
+            )
+        )
+
+    return sessions
+
+
+def _pair_leg_from_event(event: _Event) -> _PairLeg | None:
+    if event.kind == "TRADE" and event.side in {"BUY", "SELL"} and event.size > 1e-12:
+        return _PairLeg(
+            timestamp=int(event.timestamp),
+            tx=str(event.tx),
+            qty=float(event.size),
+            price=float(event.price),
+        )
+    if event.kind in {"REDEEM", "SETTLEMENT"} and event.size > 1e-12:
+        price = float(event.usdc_size) / float(event.size) if float(event.size) > 1e-12 else 0.0
+        return _PairLeg(
+            timestamp=int(event.timestamp),
+            tx=str(event.tx),
+            qty=float(event.size),
+            price=price,
+        )
+    return None
+
+
+def _emit_trade_pair_sessions(
+    market_slug: str,
+    side: str,
+    outcome: str,
+    buy_block: list[_PairLeg],
+    close_block: list[_PairLeg],
+    terminal: bool,
+) -> list[TradeSession]:
+    total_buy_qty = _pair_leg_qty_sum(buy_block)
+    total_close_qty = _pair_leg_qty_sum(close_block)
+    matched_qty = min(total_buy_qty, total_close_qty)
+    sessions: list[TradeSession] = []
+
+    if matched_qty > 1e-12:
+        entry_legs = _take_pair_legs_from_end(buy_block, matched_qty)
+        exit_legs = _take_pair_legs_from_start(close_block, matched_qty)
+        sessions.append(
+            _build_trade_pair_session(
+                market_slug=market_slug,
+                side=side,
+                outcome=outcome,
+                entry_legs=entry_legs,
+                exit_legs=exit_legs,
+                synthetic_zero=False,
+                synthetic_close_timestamp=None,
+            )
+        )
+
+    if terminal:
+        residual_qty = max(0.0, total_buy_qty - matched_qty)
+        if residual_qty > 1e-12:
+            residual_entry_legs = _take_pair_legs_from_start(buy_block, residual_qty)
+            synthetic_close_ts = (
+                close_block[-1].timestamp
+                if close_block
+                else (buy_block[-1].timestamp if buy_block else 0)
+            )
+            sessions.append(
+                _build_trade_pair_session(
+                    market_slug=market_slug,
+                    side=side,
+                    outcome=outcome,
+                    entry_legs=residual_entry_legs,
+                    exit_legs=[],
+                    synthetic_zero=True,
+                    synthetic_close_timestamp=synthetic_close_ts,
+                )
+            )
+
+    return sessions
+
+
+def _pair_leg_qty_sum(legs: list[_PairLeg]) -> float:
+    return sum(float(leg.qty) for leg in legs)
+
+
+def _take_pair_legs_from_start(legs: list[_PairLeg], target_qty: float) -> list[_PairLeg]:
+    remaining = max(0.0, float(target_qty))
+    out: list[_PairLeg] = []
+    for leg in legs:
+        if remaining <= 1e-12:
+            break
+        take = min(float(leg.qty), remaining)
+        if take <= 1e-12:
+            continue
+        out.append(_PairLeg(timestamp=leg.timestamp, tx=leg.tx, qty=take, price=float(leg.price)))
+        remaining -= take
+    return out
+
+
+def _take_pair_legs_from_end(legs: list[_PairLeg], target_qty: float) -> list[_PairLeg]:
+    remaining = max(0.0, float(target_qty))
+    rev_out: list[_PairLeg] = []
+    for leg in reversed(legs):
+        if remaining <= 1e-12:
+            break
+        take = min(float(leg.qty), remaining)
+        if take <= 1e-12:
+            continue
+        rev_out.append(_PairLeg(timestamp=leg.timestamp, tx=leg.tx, qty=take, price=float(leg.price)))
+        remaining -= take
+    return list(reversed(rev_out))
+
+
+def _pair_leg_notional_sum(legs: list[_PairLeg]) -> float:
+    return sum(float(leg.qty) * float(leg.price) for leg in legs)
+
+
+def _pair_leg_avg_price(legs: list[_PairLeg]) -> float | None:
+    qty = _pair_leg_qty_sum(legs)
+    if qty <= 1e-12:
+        return None
+    return _pair_leg_notional_sum(legs) / qty
+
+
+def _build_trade_pair_session(
+    market_slug: str,
+    side: str,
+    outcome: str,
+    entry_legs: list[_PairLeg],
+    exit_legs: list[_PairLeg],
+    synthetic_zero: bool,
+    synthetic_close_timestamp: int | None,
+) -> TradeSession:
+    open_qty = _pair_leg_qty_sum(entry_legs)
+    open_notional = _pair_leg_notional_sum(entry_legs)
+    close_qty = open_qty
+    close_notional = 0.0 if synthetic_zero else _pair_leg_notional_sum(exit_legs)
+    open_avg_price = _pair_leg_avg_price(entry_legs)
+    close_avg_price = 0.0 if synthetic_zero else _pair_leg_avg_price(exit_legs)
+    open_timestamp = entry_legs[0].timestamp if entry_legs else synthetic_close_timestamp or 0
+    end_timestamp = (
+        synthetic_close_timestamp
+        if synthetic_zero
+        else (exit_legs[-1].timestamp if exit_legs else open_timestamp)
+    )
+    realized = close_notional - open_notional
+    return_pct = (realized / open_notional) * 100.0 if open_notional > 1e-12 else None
+    exclusion_reason = None if open_notional > 1e-12 else "zero_open_notional"
+
+    return TradeSession(
+        market_slug=market_slug,
+        start_timestamp=int(open_timestamp),
+        end_timestamp=int(end_timestamp),
+        entry_side=side,
+        entry_outcome=outcome,
+        open_timestamp=int(open_timestamp),
+        open_hour_utc=datetime.fromtimestamp(int(open_timestamp), tz=timezone.utc).hour,
+        open_avg_price=round(float(open_avg_price), 6) if open_avg_price is not None else None,
+        open_notional_usdc=round(open_notional, 10),
+        open_qty=round(open_qty, 10),
+        close_avg_price=round(float(close_avg_price), 6) if close_avg_price is not None else None,
+        close_notional_usdc=round(close_notional, 10),
+        close_qty=round(close_qty, 10),
+        peak_position_notional_usdc=round(open_notional, 10),
+        realized_pnl_usdc=round(realized, 10),
+        return_on_open_notional_pct=round(return_pct, 6) if return_pct is not None else None,
+        event_count=len(entry_legs) + len(exit_legs) + (1 if synthetic_zero else 0),
+        has_trade_entry=open_qty > 1e-12,
+        is_chart_eligible=exclusion_reason is None,
+        exclusion_reason=exclusion_reason,
+        warning_codes=(["TERMINAL_FORCE_ZERO_CLOSE"] if synthetic_zero else []),
+    )
+
+
+def _pair_session_diagnostics(sessions: list[TradeSession]) -> SessionAnalyticsDiagnostics:
+    diagnostics = SessionAnalyticsDiagnostics(
+        total_detected_sessions=len(sessions),
+        closed_sessions=len(sessions),
+    )
+    for session in sessions:
+        if session.is_chart_eligible:
+            diagnostics.chart_eligible_sessions += 1
+        elif session.exclusion_reason == "no_trade_entry":
+            diagnostics.excluded_no_trade_entry_count += 1
+        elif session.exclusion_reason == "zero_open_notional":
+            diagnostics.excluded_zero_open_notional_count += 1
+        else:
+            diagnostics.excluded_warning_session_count += 1
+    return diagnostics
+
+
 def _market_ts_from_slug(market_slug: str) -> int | None:
     try:
         return int(str(market_slug).rsplit("-", 1)[-1])
@@ -945,3 +1138,52 @@ def build_curve(deltas: list[PnlDelta]) -> list[tuple[int, float, float]]:
         cumulative += delta
         points.append((ts, delta, cumulative))
     return points
+
+
+def build_turnover_curve(deltas: list[TurnoverDelta]) -> list[tuple[int, float, float]]:
+    by_ts: dict[int, float] = defaultdict(float)
+    for delta in deltas:
+        by_ts[delta.timestamp] += delta.delta_turnover_usdc
+
+    cumulative = 0.0
+    points: list[tuple[int, float, float]] = []
+    for ts in sorted(by_ts.keys()):
+        delta = by_ts[ts]
+        cumulative += delta
+        points.append((ts, delta, cumulative))
+    return points
+
+
+def build_pnl_turnover_timeline(
+    start_ts: int,
+    total_deltas: list[PnlDelta],
+    total_deltas_no_fee: list[PnlDelta],
+    turnover_deltas: list[TurnoverDelta],
+) -> list[tuple[int, float, float, float]]:
+    """Return (timestamp, cum_turnover, cum_pnl_net, cum_pnl_no_fee), sorted by time."""
+    pnl_by_ts: dict[int, float] = defaultdict(float)
+    for d in total_deltas:
+        pnl_by_ts[d.timestamp] += d.delta_pnl_usdc
+    pnl_nf_by_ts: dict[int, float] = defaultdict(float)
+    for d in total_deltas_no_fee:
+        pnl_nf_by_ts[d.timestamp] += d.delta_pnl_usdc
+    turn_by_ts: dict[int, float] = defaultdict(float)
+    for d in turnover_deltas:
+        turn_by_ts[d.timestamp] += d.delta_turnover_usdc
+
+    all_ts = sorted(set(pnl_by_ts) | set(pnl_nf_by_ts) | set(turn_by_ts))
+    out: list[tuple[int, float, float, float]] = []
+    cum_turn = 0.0
+    cum_pnl = 0.0
+    cum_pnl_nf = 0.0
+
+    if all_ts and int(all_ts[0]) > int(start_ts):
+        out.append((int(start_ts), 0.0, 0.0, 0.0))
+
+    for ts in all_ts:
+        cum_turn += turn_by_ts.get(ts, 0.0)
+        cum_pnl += pnl_by_ts.get(ts, 0.0)
+        cum_pnl_nf += pnl_nf_by_ts.get(ts, 0.0)
+        out.append((int(ts), cum_turn, cum_pnl, cum_pnl_nf))
+
+    return out

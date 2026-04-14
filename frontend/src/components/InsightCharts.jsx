@@ -165,14 +165,14 @@ function formatTooltipDetails(title, row) {
     Number(row?.session_count || 0) > 0
   ) {
     const avgPeak = Number(row.sum_peak_position_notional_usdc) / Number(row.session_count);
-    lines.push(`Avg peak position (cost): <b>${formatUsd(avgPeak)}</b>`);
+    lines.push(`Avg matched entry notional: <b>${formatUsd(avgPeak)}</b>`);
   }
   lines.push(
     `Weighted return: <b>${Number(row?.weighted_return_on_open_notional_pct || 0).toFixed(2)}%</b>`,
     `Win rate: <b>${Number(row?.win_rate_pct || 0).toFixed(2)}%</b>`,
     `Unweighted mean: <b>${Number(row?.average_return_on_open_notional_pct || 0).toFixed(2)}%</b>`,
-    `Closed sessions: <b>${Number(row?.session_count || 0)}</b>`,
-    `Open notional: <b>${formatUsd(row?.sum_open_notional_usdc)}</b>`,
+    `Closed pairs: <b>${Number(row?.session_count || 0)}</b>`,
+    `Entry notional: <b>${formatUsd(row?.sum_open_notional_usdc)}</b>`,
     `Realized PnL: <b>${formatUsd(row?.sum_realized_pnl_usdc)}</b>`,
   );
   return lines.join("<br/>");
@@ -248,9 +248,9 @@ function SessionAnalyticsSection({ sectionLabel = "ALL", sessionAnalytics, peakN
       return "";
     }
     if (peakUsedCap != null) {
-      return `Session peak = Σ(shares×lot cost). X-axis 0–$${peakUsedCap.toFixed(0)} in ${PEAK_DISPLAY_BIN_COUNT} equal buckets (manual cap; larger peaks stack in last bucket).`;
+      return `Matched entry notional = Σ(selected shares × entry price). X-axis 0–$${peakUsedCap.toFixed(0)} in ${PEAK_DISPLAY_BIN_COUNT} equal buckets (manual cap; larger pairs stack in last bucket).`;
     }
-    return `Session peak = Σ(shares×lot cost). X-axis 0–$${peakAxisUpper.toFixed(0)} in ${PEAK_DISPLAY_BIN_COUNT} equal buckets (empty cap → use data max).`;
+    return `Matched entry notional = Σ(selected shares × entry price). X-axis 0–$${peakAxisUpper.toFixed(0)} in ${PEAK_DISPLAY_BIN_COUNT} equal buckets (empty cap → use data max).`;
   }, [peakAxisUpper, peakUsedCap]);
   const eligibleSessionCount = Number(diagnostics.chart_eligible_sessions || 0);
 
@@ -279,8 +279,8 @@ function SessionAnalyticsSection({ sectionLabel = "ALL", sessionAnalytics, peakN
     return {
       animationDuration: 420,
       title: {
-        text: "Average Return by Session Open Hour",
-        subtext: "Closed flat-to-flat sessions, grouped by the UTC hour of the first BUY that opened the session",
+        text: "Average Return by Pair Entry Hour",
+        subtext: "BUY-block -> reduce-block pairs, grouped by the UTC hour of the matched entry BUY tail",
         left: 14,
         top: 6,
         textStyle: { color: "#213047", fontWeight: 700, fontSize: 17 },
@@ -351,8 +351,8 @@ function SessionAnalyticsSection({ sectionLabel = "ALL", sessionAnalytics, peakN
     return {
       animationDuration: 420,
       title: {
-        text: "Win Rate by Session Open Hour",
-        subtext: "Same flat-to-flat sessions, bucketed by the UTC hour of the opening BUY",
+        text: "Win Rate by Pair Entry Hour",
+        subtext: "Same pair sample, bucketed by the UTC hour of the matched entry BUY tail",
         left: 14,
         top: 6,
         textStyle: { color: "#213047", fontWeight: 700, fontSize: 17 },
@@ -443,8 +443,8 @@ function SessionAnalyticsSection({ sectionLabel = "ALL", sessionAnalytics, peakN
     return {
       animationDuration: 480,
       title: {
-        text: "Average Return by Session Open Price Bucket",
-        subtext: "Cross-market 0.01 price buckets using the session's BUY VWAP as the opening price",
+        text: "Average Return by Pair Entry Price Bucket",
+        subtext: "Cross-market 0.01 price buckets using the matched BUY tail VWAP as the entry price",
         left: 14,
         top: 6,
         textStyle: { color: "#213047", fontWeight: 700, fontSize: 17 },
@@ -467,7 +467,7 @@ function SessionAnalyticsSection({ sectionLabel = "ALL", sessionAnalytics, peakN
         min: priceAxisRange.min,
         max: priceAxisRange.max,
         scale: priceAxisRange.scale,
-        name: "Open price bucket center",
+        name: "Entry price bucket center",
         nameLocation: "middle",
         nameGap: 28,
         nameTextStyle: { color: "#617089", fontSize: 11 },
@@ -525,8 +525,8 @@ function SessionAnalyticsSection({ sectionLabel = "ALL", sessionAnalytics, peakN
     return {
       animationDuration: 480,
       title: {
-        text: "Win Rate by Session Open Price Bucket",
-        subtext: "Each bucket uses the same session sample as the return scatter and treats exact open=close as half-win",
+        text: "Win Rate by Pair Entry Price Bucket",
+        subtext: "Each bucket uses the same pair sample as the return scatter and treats exact entry=exit as half-win",
         left: 14,
         top: 6,
         textStyle: { color: "#213047", fontWeight: 700, fontSize: 17 },
@@ -549,7 +549,7 @@ function SessionAnalyticsSection({ sectionLabel = "ALL", sessionAnalytics, peakN
         min: priceAxisRange.min,
         max: priceAxisRange.max,
         scale: priceAxisRange.scale,
-        name: "Open price bucket center",
+        name: "Entry price bucket center",
         nameLocation: "middle",
         nameGap: 28,
         nameTextStyle: { color: "#617089", fontSize: 11 },
@@ -615,7 +615,7 @@ function SessionAnalyticsSection({ sectionLabel = "ALL", sessionAnalytics, peakN
     return {
       animationDuration: 480,
       title: {
-        text: "Average Return by Peak Position Notional",
+        text: "Average Return by Pair Entry Notional",
         subtext: peakChartSubtext || "Set max order size above, or leave empty to use data max; axis is split into 20 equal buckets.",
         left: 14,
         top: 6,
@@ -639,7 +639,7 @@ function SessionAnalyticsSection({ sectionLabel = "ALL", sessionAnalytics, peakN
         min: peakAxisRange.min,
         max: peakAxisRange.max,
         scale: peakAxisRange.scale,
-        name: "Peak position (USDC) bucket center",
+        name: "Entry notional (USDC) bucket center",
         nameLocation: "middle",
         nameGap: 28,
         nameTextStyle: { color: "#617089", fontSize: 11 },
@@ -697,10 +697,10 @@ function SessionAnalyticsSection({ sectionLabel = "ALL", sessionAnalytics, peakN
     return {
       animationDuration: 480,
       title: {
-        text: "Win Rate by Peak Position Notional",
+        text: "Win Rate by Pair Entry Notional",
         subtext: peakChartSubtext
-          ? `${peakChartSubtext} Win rate uses the same session rules as other charts.`
-          : "Same buckets as the return scatter; win rate uses the same session rules as other charts.",
+          ? `${peakChartSubtext} Win rate uses the same pair rules as other charts.`
+          : "Same buckets as the return scatter; win rate uses the same pair rules as other charts.",
         left: 14,
         top: 6,
         textStyle: { color: "#213047", fontWeight: 700, fontSize: 17 },
@@ -723,7 +723,7 @@ function SessionAnalyticsSection({ sectionLabel = "ALL", sessionAnalytics, peakN
         min: peakAxisRange.min,
         max: peakAxisRange.max,
         scale: peakAxisRange.scale,
-        name: "Peak position (USDC) bucket center",
+        name: "Entry notional (USDC) bucket center",
         nameLocation: "middle",
         nameGap: 28,
         nameTextStyle: { color: "#617089", fontSize: 11 },
@@ -757,9 +757,8 @@ function SessionAnalyticsSection({ sectionLabel = "ALL", sessionAnalytics, peakN
   }, [peakAxisRange.max, peakAxisRange.min, peakAxisRange.scale, peakChartSubtext, peakRows]);
 
   const diagnosticsText = [
-    `Eligible sessions: ${eligibleSessionCount}`,
-    `Closed: ${Number(diagnostics.closed_sessions || 0)}`,
-    `Open at window end: ${Number(diagnostics.excluded_open_session_count || 0)}`,
+    `Eligible pairs: ${eligibleSessionCount}`,
+    `Closed pairs: ${Number(diagnostics.closed_sessions || 0)}`,
     `No trade entry: ${Number(diagnostics.excluded_no_trade_entry_count || 0)}`,
     `Warning-filtered: ${Number(diagnostics.excluded_warning_session_count || 0)}`,
   ].join(" · ");
@@ -776,7 +775,7 @@ function SessionAnalyticsSection({ sectionLabel = "ALL", sessionAnalytics, peakN
           <div className="chart-wrap chart-wrap-insights">
             {eligibleSessionCount <= 0 ? (
               <div className="insight-empty-hint">
-                <Text type="secondary">No closed trade sessions with a trade-based opening price were found.</Text>
+                <Text type="secondary">No BUY-block {"->"} reduce-block pairs with a trade-based entry price were found.</Text>
               </div>
             ) : (
               <ReactECharts option={hourlyOption} notMerge lazyUpdate style={{ height: "100%", width: "100%" }} />
@@ -787,7 +786,7 @@ function SessionAnalyticsSection({ sectionLabel = "ALL", sessionAnalytics, peakN
           <div className="chart-wrap chart-wrap-insights chart-wrap-scatter">
             {priceRows.length <= 0 ? (
               <div className="insight-empty-hint">
-                <Text type="secondary">Price buckets appear after closed sessions with BUY-led openings are detected.</Text>
+                <Text type="secondary">Price buckets appear after pair cycles with BUY-led entries are detected.</Text>
               </div>
             ) : (
               <ReactECharts option={priceOption} notMerge lazyUpdate style={{ height: "100%", width: "100%" }} />
@@ -798,7 +797,7 @@ function SessionAnalyticsSection({ sectionLabel = "ALL", sessionAnalytics, peakN
           <div className="chart-wrap chart-wrap-insights">
             {eligibleSessionCount <= 0 ? (
               <div className="insight-empty-hint">
-                <Text type="secondary">Win-rate buckets need at least one closed trade session.</Text>
+                <Text type="secondary">Win-rate buckets need at least one closed pair cycle.</Text>
               </div>
             ) : (
               <ReactECharts option={hourlyWinRateOption} notMerge lazyUpdate style={{ height: "100%", width: "100%" }} />
@@ -809,7 +808,7 @@ function SessionAnalyticsSection({ sectionLabel = "ALL", sessionAnalytics, peakN
           <div className="chart-wrap chart-wrap-insights chart-wrap-scatter">
             {priceRows.length <= 0 ? (
               <div className="insight-empty-hint">
-                <Text type="secondary">Win-rate price buckets appear after closed sessions with BUY-led openings are detected.</Text>
+                <Text type="secondary">Win-rate price buckets appear after pair cycles with BUY-led entries are detected.</Text>
               </div>
             ) : (
               <ReactECharts option={priceWinRateOption} notMerge lazyUpdate style={{ height: "100%", width: "100%" }} />
@@ -821,8 +820,7 @@ function SessionAnalyticsSection({ sectionLabel = "ALL", sessionAnalytics, peakN
             {eligibleSessionCount <= 0 || peakRows.length <= 0 ? (
               <div className="insight-empty-hint">
                 <Text type="secondary">
-                  Peak position notional buckets appear after closed sessions; max cost = Σ (shares × lot price) during the
-                  session.
+                  Entry notional buckets appear after pair cycles; matched entry notional = Σ (selected shares × entry price).
                 </Text>
               </div>
             ) : (
@@ -834,7 +832,7 @@ function SessionAnalyticsSection({ sectionLabel = "ALL", sessionAnalytics, peakN
           <div className="chart-wrap chart-wrap-insights chart-wrap-scatter">
             {eligibleSessionCount <= 0 || peakRows.length <= 0 ? (
               <div className="insight-empty-hint">
-                <Text type="secondary">Win rate by peak position notional uses the same buckets as the return scatter.</Text>
+                <Text type="secondary">Win rate by entry notional uses the same buckets as the return scatter.</Text>
               </div>
             ) : (
               <ReactECharts option={peakNotionalWinRateOption} notMerge lazyUpdate style={{ height: "100%", width: "100%" }} />
@@ -851,7 +849,7 @@ function SessionAnalyticsSection({ sectionLabel = "ALL", sessionAnalytics, peakN
 
 export default function InsightCharts({ sessionAnalytics, sessionAnalyticsBySide = {}, peakNotionalCapUsdc = "" }) {
   return (
-    <Card className="chart-card insight-charts-card" bodyStyle={{ padding: 12 }} title="Session analytics">
+    <Card className="chart-card insight-charts-card" bodyStyle={{ padding: 12 }} title="Pair-cycle analytics">
       <SessionAnalyticsSection sectionLabel="ALL" sessionAnalytics={sessionAnalytics} peakNotionalCapUsdc={peakNotionalCapUsdc} />
       <Divider style={{ margin: "18px 0" }} />
       <SessionAnalyticsSection

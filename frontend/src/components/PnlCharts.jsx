@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import ReactECharts from "echarts-for-react";
 import dayjs from "dayjs";
-import { Button, Card, Col, Row, Segmented, Space } from "antd";
+import { Button, Card, Col, Empty, Row, Segmented, Space } from "antd";
 import { symbolColor } from "../utils/format";
 
 function axisTimeLabel(value) {
@@ -152,6 +152,63 @@ function sampleSortedTimestamps(timestamps, maxPoints = MAX_RENDER_POINTS) {
   return sampled;
 }
 
+function samplePnlTurnoverPoints(points, maxPoints = MAX_RENDER_POINTS) {
+  const arr = Array.isArray(points) ? points : [];
+  const n = arr.length;
+  if (n <= maxPoints) {
+    return arr;
+  }
+  const sampled = [];
+  let prevIdx = -1;
+  for (let i = 0; i < maxPoints; i += 1) {
+    const idx = Math.floor((i * (n - 1)) / (maxPoints - 1));
+    if (idx !== prevIdx) {
+      sampled.push(arr[idx]);
+      prevIdx = idx;
+    }
+  }
+  if (sampled[sampled.length - 1] !== arr[n - 1]) {
+    sampled.push(arr[n - 1]);
+  }
+  return sampled;
+}
+
+function turnoverTimeTooltipFormatter(params) {
+  const rows = Array.isArray(params) ? params : [params];
+  if (!rows.length) {
+    return "";
+  }
+  const rawTs = rows[0].axisValue;
+  const ts = Number(rawTs);
+  const lines = [`Time: ${tooltipTimeLabel(ts)}`];
+  for (const row of rows) {
+    const value = row.value;
+    const display = value == null ? "-" : Number(value).toFixed(4);
+    lines.push(`${row.seriesName || "-"}: $${display}`);
+  }
+  return lines.join("<br/>");
+}
+
+function pnlVsTurnoverTooltipFormatter(params) {
+  const rows = Array.isArray(params) ? params : [params];
+  if (!rows.length) {
+    return "";
+  }
+  const lines = [];
+  for (const row of rows) {
+    const pair = row.value;
+    if (!Array.isArray(pair) || pair.length < 2) {
+      continue;
+    }
+    const x = Number(pair[0] || 0);
+    const y = Number(pair[1] || 0);
+    lines.push(
+      `${row.seriesName || "-"}: PnL <b>${y.toFixed(4)}</b> USDC @ turnover <b>${x.toFixed(4)}</b> USDC`,
+    );
+  }
+  return lines.length ? lines.join("<br/>") : "";
+}
+
 export default function PnlCharts({
   totalSeries,
   totalSeriesNoFee,
@@ -160,6 +217,7 @@ export default function PnlCharts({
   sideSeries,
   sideSeriesNoFee,
   drawdownMarkers,
+  turnoverPnlSeries = [],
 }) {
   const [viewMode, setViewMode] = useState("net");
   const [showDrawdownMarks, setShowDrawdownMarks] = useState(false);
@@ -633,6 +691,198 @@ export default function PnlCharts({
     };
   }, [symbolSeries, symbolSeriesNoFee, showNet, showNoFee, showDrawdownMarks, drawdownMarkers]);
 
+  const sampledTurnoverPnl = useMemo(() => samplePnlTurnoverPoints(turnoverPnlSeries || []), [turnoverPnlSeries]);
+
+  const turnoverTimeOption = useMemo(() => {
+    const pts = sampledTurnoverPnl;
+    const xData = pts.map((p) => p.ts);
+    return {
+      animation: false,
+      title: {
+        text: "Cumulative turnover",
+        subtext: "TRADE fills: Σ(size × price), from query start",
+        left: 14,
+        top: 8,
+        textStyle: {
+          color: "#213047",
+          fontWeight: 700,
+          fontSize: 18,
+        },
+        subtextStyle: {
+          color: "#617089",
+          fontSize: 12,
+        },
+      },
+      tooltip: {
+        trigger: "axis",
+        formatter: turnoverTimeTooltipFormatter,
+      },
+      legend: {
+        top: 8,
+        right: 18,
+        icon: "rect",
+        itemWidth: 12,
+        itemHeight: 8,
+      },
+      grid: {
+        left: 78,
+        right: 30,
+        top: 96,
+        bottom: 44,
+        containLabel: true,
+      },
+      xAxis: {
+        type: "category",
+        position: "bottom",
+        boundaryGap: false,
+        data: xData,
+        axisLine: { onZero: false },
+        axisLabel: {
+          color: "#617089",
+          hideOverlap: true,
+          formatter: axisTimeLabel,
+        },
+      },
+      yAxis: {
+        type: "value",
+        name: "USDC",
+        axisLabel: {
+          color: "#617089",
+          formatter: (value) => Number(value).toFixed(2),
+          margin: 12,
+        },
+        splitLine: {
+          lineStyle: {
+            color: "rgba(146,160,181,0.2)",
+          },
+        },
+      },
+      series: [
+        {
+          name: "Cumulative turnover",
+          type: "line",
+          color: "#6366f1",
+          smooth: 0.25,
+          smoothMonotone: "x",
+          showSymbol: false,
+          lineStyle: {
+            width: 2.8,
+            color: "#6366f1",
+            cap: "round",
+            join: "round",
+          },
+          data: pts.map((p) => p.cumTurnover),
+        },
+      ],
+    };
+  }, [sampledTurnoverPnl]);
+
+  const pnlVsTurnoverOption = useMemo(() => {
+    const pts = sampledTurnoverPnl;
+    const series = [];
+    if (showNet) {
+      series.push({
+        name: "Net PnL",
+        type: "line",
+        color: "#2ca7b4",
+        smooth: 0.22,
+        showSymbol: false,
+        lineStyle: {
+          width: 2.8,
+          color: "#2ca7b4",
+          cap: "round",
+          join: "round",
+        },
+        data: pts.map((p) => [p.cumTurnover, p.cumPnl]),
+      });
+    }
+    if (showNoFee) {
+      series.push({
+        name: "No-Fee PnL",
+        type: "line",
+        color: "#f59e0b",
+        smooth: 0.22,
+        showSymbol: false,
+        lineStyle: {
+          width: 2.6,
+          color: "#f59e0b",
+          type: showNet ? "dashed" : "solid",
+          cap: "round",
+          join: "round",
+        },
+        data: pts.map((p) => [p.cumTurnover, p.cumPnlNoFee]),
+      });
+    }
+    return {
+      animation: false,
+      title: {
+        text: "PnL vs cumulative turnover",
+        subtext: "Horizontal: Σ(size×price) on TRADE; vertical follows Net / No Fee / Compare",
+        left: 14,
+        top: 8,
+        textStyle: {
+          color: "#213047",
+          fontWeight: 700,
+          fontSize: 18,
+        },
+        subtextStyle: {
+          color: "#617089",
+          fontSize: 12,
+        },
+      },
+      tooltip: {
+        trigger: "axis",
+        formatter: pnlVsTurnoverTooltipFormatter,
+      },
+      legend: {
+        top: 8,
+        right: 18,
+        icon: "rect",
+        itemWidth: 12,
+        itemHeight: 8,
+      },
+      grid: {
+        left: 78,
+        right: 30,
+        top: 112,
+        bottom: 52,
+        containLabel: true,
+      },
+      xAxis: {
+        type: "value",
+        name: "Cumulative turnover (USDC)",
+        nameLocation: "middle",
+        nameGap: 36,
+        axisLabel: {
+          color: "#617089",
+          formatter: (value) => Number(value).toFixed(2),
+        },
+        splitLine: {
+          lineStyle: {
+            color: "rgba(146,160,181,0.2)",
+          },
+        },
+      },
+      yAxis: {
+        type: "value",
+        name: "Cumulative PnL (USDC)",
+        axisLabel: {
+          color: "#617089",
+          formatter: (value) => Number(value).toFixed(2),
+          margin: 12,
+        },
+        splitLine: {
+          lineStyle: {
+            color: "rgba(146,160,181,0.2)",
+          },
+        },
+      },
+      series,
+    };
+  }, [sampledTurnoverPnl, showNet, showNoFee]);
+
+  const hasTurnoverData = Array.isArray(turnoverPnlSeries) && turnoverPnlSeries.length > 0;
+
   return (
     <Card
       className="chart-card"
@@ -660,9 +910,27 @@ export default function PnlCharts({
             <ReactECharts option={totalOption} notMerge lazyUpdate style={{ height: "100%", width: "100%" }} />
           </div>
         </Col>
-        <Col xs={24} lg={12}>
+               <Col xs={24} lg={12}>
           <div className="chart-wrap">
             <ReactECharts option={symbolOption} notMerge lazyUpdate style={{ height: "100%", width: "100%" }} />
+          </div>
+        </Col>
+        <Col xs={24} lg={12}>
+          <div className="chart-wrap">
+            {hasTurnoverData ? (
+              <ReactECharts option={turnoverTimeOption} notMerge lazyUpdate style={{ height: "100%", width: "100%" }} />
+            ) : (
+              <Empty style={{ marginTop: 48 }} description="Run analysis to see cumulative turnover" />
+            )}
+          </div>
+        </Col>
+        <Col xs={24} lg={12}>
+          <div className="chart-wrap">
+            {hasTurnoverData ? (
+              <ReactECharts option={pnlVsTurnoverOption} notMerge lazyUpdate style={{ height: "100%", width: "100%" }} />
+            ) : (
+              <Empty style={{ marginTop: 48 }} description="Run analysis to see PnL vs turnover" />
+            )}
           </div>
         </Col>
       </Row>

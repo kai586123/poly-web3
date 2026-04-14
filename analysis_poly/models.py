@@ -98,6 +98,13 @@ class CurvePoint(BaseModel):
     cumulative_realized_pnl_usdc: float
 
 
+class PnlTurnoverPoint(BaseModel):
+    timestamp: int
+    cumulative_turnover_usdc: float
+    cumulative_realized_pnl_usdc: float
+    cumulative_realized_pnl_usdc_no_fee: float
+
+
 class TokenReport(BaseModel):
     token_id: str
     side: Literal["YES", "NO"]
@@ -235,6 +242,7 @@ class AnalysisReport(BaseModel):
     total_curve_no_fee: list[CurvePoint] = Field(default_factory=list)
     market_curves_no_fee: dict[str, list[CurvePoint]] = Field(default_factory=dict)
     side_curves_no_fee: dict[Literal["YES", "NO"], list[CurvePoint]] = Field(default_factory=dict)
+    total_pnl_turnover_curve: list[PnlTurnoverPoint] = Field(default_factory=list)
     warnings: list[WarningItem]
     is_partial: bool = False
     artifacts: dict[str, str] = Field(default_factory=dict)

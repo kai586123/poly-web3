@@ -19,6 +19,7 @@ from .models import (
     CurvePoint,
     MarketReport,
     MarketScatterPoint,
+    PnlTurnoverPoint,
     PolymarketMarket,
     SessionAnalytics,
     SessionAnalyticsDiagnostics,
@@ -32,13 +33,13 @@ from .models import (
 )
 from .polymarket_client import PolymarketApiClient
 from .raw_api_cache import RawPolymarketDataCache
-from .profit_engine import PnlDelta, ProfitEngine, build_curve
+from .profit_engine import PnlDelta, ProfitEngine, TurnoverDelta, build_curve, build_pnl_turnover_timeline
 from .slugs import MarketSlugSpec, generate_market_slug_specs
 
 MARKET_FETCH_CONCURRENCY_DEFAULT = 10
 MARKET_TIMESTAMP_CHUNK_SIZE_DEFAULT = 20
 MARKET_RESULT_CACHE_RECENT_WINDOW_SEC = 30 * 60
-MARKET_RESULT_CACHE_SCHEMA_VERSION = 4
+MARKET_RESULT_CACHE_SCHEMA_VERSION = 6
 DEFAULT_FALLBACK_FEE_RATE_BPS = 72.0
 EMIT_LIVE_CURVE_POINTS = False
 SESSION_PRICE_BIN_WIDTH = 0.01
@@ -82,6 +83,7 @@ class _MarketProcessResult:
     market_report_no_fee: MarketReport
     deltas: list[PnlDelta]
     deltas_no_fee: list[PnlDelta]
+    turnover_deltas: list[TurnoverDelta]
     warnings: list[WarningItem]
     trade_sessions: list[TradeSession]
     session_diagnostics: SessionAnalyticsDiagnostics
@@ -199,6 +201,7 @@ class PolymarketProfitAnalyzer:
         }
         total_deltas: list[PnlDelta] = []
         total_deltas_no_fee: list[PnlDelta] = []
+        total_turnover_deltas: list[TurnoverDelta] = []
         market_deltas: dict[str, list[PnlDelta]] = defaultdict(list)
         market_deltas_no_fee: dict[str, list[PnlDelta]] = defaultdict(list)
         side_deltas: dict[str, list[PnlDelta]] = defaultdict(list)
@@ -272,6 +275,7 @@ class PolymarketProfitAnalyzer:
                                 market_scatter_points.append(result.scatter_point)
                             total_deltas.extend(result.deltas)
                             total_deltas_no_fee.extend(result.deltas_no_fee)
+                            total_turnover_deltas.extend(result.turnover_deltas)
                             side_by_token_id = {
                                 result.market_report.up_token_id: "YES",
                                 result.market_report.down_token_id: "NO",
@@ -414,6 +418,21 @@ class PolymarketProfitAnalyzer:
                 for ts, delta, cum in build_curve(total_deltas_no_fee)
             ]
 
+            total_pnl_turnover_curve = [
+                PnlTurnoverPoint(
+                    timestamp=ts,
+                    cumulative_turnover_usdc=round(ct, 10),
+                    cumulative_realized_pnl_usdc=round(cp, 10),
+                    cumulative_realized_pnl_usdc_no_fee=round(cpnf, 10),
+                )
+                for ts, ct, cp, cpnf in build_pnl_turnover_timeline(
+                    req.start_ts,
+                    total_deltas,
+                    total_deltas_no_fee,
+                    total_turnover_deltas,
+                )
+            ]
+
             market_curves_no_fee: dict[str, list[CurvePoint]] = {}
             for market_slug, deltas in market_deltas_no_fee.items():
                 if not deltas:
@@ -463,6 +482,7 @@ class PolymarketProfitAnalyzer:
                 total_curve_no_fee=total_curve_no_fee,
                 market_curves_no_fee=market_curves_no_fee,
                 side_curves_no_fee=side_curves_no_fee,
+                total_pnl_turnover_curve=total_pnl_turnover_curve,
                 warnings=all_warnings,
                 is_partial=stop_event.is_set() and len(market_reports) < total_markets,
                 hourly_realized_pnl_usdc=_build_hourly_pnl_buckets(total_deltas),
@@ -573,6 +593,7 @@ class PolymarketProfitAnalyzer:
             market_report_no_fee=market_report_no_fee,
             deltas=deltas,
             deltas_no_fee=deltas_no_fee,
+            turnover_deltas=replay.turnover_deltas,
             warnings=warnings,
             trade_sessions=replay.trade_sessions,
             session_diagnostics=replay.session_diagnostics,
@@ -662,9 +683,38 @@ class PolymarketProfitAnalyzer:
 
         with Path(path).open("w", newline="", encoding="utf-8") as fp:
             writer = csv.writer(fp)
-            writer.writerow(["timestamp", "delta_realized_pnl_usdc", "cumulative_realized_pnl_usdc"])
-            for p in report.total_curve:
-                writer.writerow([p.timestamp, p.delta_realized_pnl_usdc, p.cumulative_realized_pnl_usdc])
+            if report.total_pnl_turnover_curve:
+                writer.writerow(
+                    [
+                        "timestamp",
+                        "delta_realized_pnl_usdc",
+                        "cumulative_realized_pnl_usdc",
+                        "delta_turnover_usdc",
+                        "cumulative_turnover_usdc",
+                        "cumulative_realized_pnl_usdc_no_fee",
+                    ]
+                )
+                prev_pnl = 0.0
+                prev_turn = 0.0
+                for p in report.total_pnl_turnover_curve:
+                    d_pnl = float(p.cumulative_realized_pnl_usdc) - prev_pnl
+                    d_turn = float(p.cumulative_turnover_usdc) - prev_turn
+                    writer.writerow(
+                        [
+                            p.timestamp,
+                            round(d_pnl, 10),
+                            p.cumulative_realized_pnl_usdc,
+                            round(d_turn, 10),
+                            p.cumulative_turnover_usdc,
+                            p.cumulative_realized_pnl_usdc_no_fee,
+                        ]
+                    )
+                    prev_pnl = float(p.cumulative_realized_pnl_usdc)
+                    prev_turn = float(p.cumulative_turnover_usdc)
+            else:
+                writer.writerow(["timestamp", "delta_realized_pnl_usdc", "cumulative_realized_pnl_usdc"])
+                for p in report.total_curve:
+                    writer.writerow([p.timestamp, p.delta_realized_pnl_usdc, p.cumulative_realized_pnl_usdc])
         return path
 
     def save_market_curve_csv(self, report: AnalysisReport, path: str | None = None) -> str:
@@ -1014,6 +1064,7 @@ def _result_to_cache_payload(result: _MarketProcessResult) -> dict:
         "market_report_no_fee": result.market_report_no_fee.model_dump(),
         "deltas": [_delta_to_dict(d) for d in result.deltas],
         "deltas_no_fee": [_delta_to_dict(d) for d in result.deltas_no_fee],
+        "turnover_deltas": [_turnover_to_dict(d) for d in result.turnover_deltas],
         "warnings": [w.model_dump() for w in result.warnings],
         "trade_sessions": [s.model_dump() for s in result.trade_sessions],
         "session_diagnostics": result.session_diagnostics.model_dump(),
@@ -1038,6 +1089,7 @@ def _result_from_cache_payload(slug: str, payload: dict) -> _MarketProcessResult
         market_report_no_fee = MarketReport.model_validate(payload["market_report_no_fee"])
         deltas = [_delta_from_dict(d) for d in payload.get("deltas", [])]
         deltas_no_fee = [_delta_from_dict(d) for d in payload.get("deltas_no_fee", [])]
+        turnover_deltas = [_turnover_from_dict(d) for d in payload.get("turnover_deltas", [])]
         warnings = [WarningItem.model_validate(w) for w in payload.get("warnings", [])]
         trade_sessions = [TradeSession.model_validate(s) for s in payload.get("trade_sessions", [])]
         session_diagnostics = SessionAnalyticsDiagnostics.model_validate(payload.get("session_diagnostics", {}))
@@ -1061,6 +1113,7 @@ def _result_from_cache_payload(slug: str, payload: dict) -> _MarketProcessResult
             market_report_no_fee=market_report_no_fee,
             deltas=deltas,
             deltas_no_fee=deltas_no_fee,
+            turnover_deltas=turnover_deltas,
             warnings=warnings,
             trade_sessions=trade_sessions,
             session_diagnostics=session_diagnostics,
@@ -1087,6 +1140,22 @@ def _delta_from_dict(payload: dict) -> PnlDelta:
         market_slug=str(payload["market_slug"]),
         token_id=str(payload["token_id"]),
         delta_pnl_usdc=float(payload["delta_pnl_usdc"]),
+    )
+
+
+def _turnover_to_dict(delta: TurnoverDelta) -> dict:
+    return {
+        "timestamp": int(delta.timestamp),
+        "market_slug": str(delta.market_slug),
+        "delta_turnover_usdc": float(delta.delta_turnover_usdc),
+    }
+
+
+def _turnover_from_dict(payload: dict) -> TurnoverDelta:
+    return TurnoverDelta(
+        timestamp=int(payload["timestamp"]),
+        market_slug=str(payload["market_slug"]),
+        delta_turnover_usdc=float(payload["delta_turnover_usdc"]),
     )
 
 

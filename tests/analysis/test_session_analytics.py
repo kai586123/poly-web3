@@ -17,7 +17,7 @@ def _trade(tx: str, ts: int, side: str, asset: str, condition_id: str, size: flo
     )
 
 
-def test_session_detection_keeps_buy_sell_buy_sell_in_single_flat_to_flat_session():
+def test_pair_detection_splits_buy_sell_buy_sell_into_two_pairs():
     market = PolymarketMarket(
         slug="btc-updown-5m-1000",
         condition_id="cond1",
@@ -42,24 +42,30 @@ def test_session_detection_keeps_buy_sell_buy_sell_in_single_flat_to_flat_sessio
         redeem_activities=[],
     )
 
-    assert len(result.trade_sessions) == 1
-    session = result.trade_sessions[0]
-    assert session.is_chart_eligible is True
-    assert session.event_count == 4
-    assert session.start_timestamp == 1000
-    assert session.end_timestamp == 1030
-    assert session.entry_side == "YES"
-    assert session.entry_outcome == "Up"
-    assert round(session.open_avg_price, 6) == 0.466667
-    assert round(session.close_avg_price, 6) == 0.633333
-    assert session.peak_position_notional_usdc > 0
-    assert round(session.open_notional_usdc, 10) == 7.0
-    assert round(session.close_notional_usdc, 10) == 9.5
-    assert round(session.realized_pnl_usdc, 10) == 2.5
-    assert round(session.return_on_open_notional_pct, 6) == 35.714286
+    assert len(result.trade_sessions) == 2
+    first, second = result.trade_sessions
+    assert first.entry_side == "YES"
+    assert first.entry_outcome == "Up"
+    assert first.start_timestamp == 1000
+    assert first.end_timestamp == 1010
+    assert round(first.open_avg_price, 6) == 0.4
+    assert round(first.close_avg_price, 6) == 0.5
+    assert round(first.open_qty, 10) == 5.0
+    assert round(first.realized_pnl_usdc, 10) == 0.5
+    assert round(first.return_on_open_notional_pct, 6) == 25.0
+
+    assert second.entry_side == "YES"
+    assert second.entry_outcome == "Up"
+    assert second.start_timestamp == 1020
+    assert second.end_timestamp == 1030
+    assert round(second.open_avg_price, 6) == 0.6
+    assert round(second.close_avg_price, 6) == 0.7
+    assert round(second.open_qty, 10) == 5.0
+    assert round(second.realized_pnl_usdc, 10) == 0.5
+    assert round(second.return_on_open_notional_pct, 6) == 16.666667
 
 
-def test_split_only_session_is_closed_but_excluded_from_chart_buckets():
+def test_split_only_market_has_no_trade_pairs():
     market = PolymarketMarket(
         slug="eth-updown-15m-3000",
         condition_id="cond2",
@@ -89,15 +95,12 @@ def test_split_only_session_is_closed_but_excluded_from_chart_buckets():
         redeem_activities=[],
     )
 
-    assert len(result.trade_sessions) == 1
-    session = result.trade_sessions[0]
-    assert session.is_chart_eligible is False
-    assert session.exclusion_reason == "no_trade_entry"
-    assert result.session_diagnostics.closed_sessions == 1
-    assert result.session_diagnostics.excluded_no_trade_entry_count == 1
+    assert result.trade_sessions == []
+    assert result.session_diagnostics.total_detected_sessions == 0
+    assert result.session_diagnostics.chart_eligible_sessions == 0
 
 
-def test_closed_market_settlement_finishes_session_when_inventory_returns_to_flat():
+def test_closed_market_settlement_closes_terminal_pair_at_settlement_price():
     market = PolymarketMarket(
         slug="btc-updown-5m-3000",
         condition_id="cond3",
@@ -127,7 +130,7 @@ def test_closed_market_settlement_finishes_session_when_inventory_returns_to_fla
     assert result.session_diagnostics.chart_eligible_sessions == 1
 
 
-def test_unresolved_closed_market_keeps_session_open_and_excludes_it_from_charts():
+def test_unresolved_closed_market_force_closes_terminal_pair_at_zero():
     market = PolymarketMarket(
         slug="btc-updown-5m-4000",
         condition_id="cond4",
@@ -148,10 +151,59 @@ def test_unresolved_closed_market_keeps_session_open_and_excludes_it_from_charts
         redeem_activities=[],
     )
 
-    assert result.trade_sessions == []
+    assert len(result.trade_sessions) == 1
+    session = result.trade_sessions[0]
     assert any(w.code == "CLOSED_MARKET_UNKNOWN_OUTCOME" for w in result.warnings)
     assert result.session_diagnostics.total_detected_sessions == 1
-    assert result.session_diagnostics.excluded_open_session_count == 1
+    assert result.session_diagnostics.chart_eligible_sessions == 1
+    assert round(session.close_avg_price, 6) == 0.0
+    assert round(session.realized_pnl_usdc, 10) == -2.0
+    assert round(session.return_on_open_notional_pct, 6) == -100.0
+    assert "TERMINAL_FORCE_ZERO_CLOSE" in session.warning_codes
+
+
+def test_partial_boundary_matching_uses_buy_tail_sell_head_and_zero_closes_residual():
+    market = PolymarketMarket(
+        slug="btc-updown-5m-5000",
+        condition_id="cond5",
+        up_token_id="up_token",
+        down_token_id="down_token",
+        outcomes=["Up", "Down"],
+        outcome_prices=[0.5, 0.5],
+    )
+    trades = [
+        _trade("0x01", 5000, "BUY", "up_token", "cond5", 10, 0.2),
+        _trade("0x02", 5010, "BUY", "up_token", "cond5", 10, 0.4),
+        _trade("0x03", 5020, "SELL", "up_token", "cond5", 15, 0.6),
+    ]
+    engine = ProfitEngine(fee_rate_bps=0, maker_reward_ratio=0, missing_cost_warn_qty=0.5)
+
+    result = engine.analyze_market(
+        market=market,
+        taker_trades=trades,
+        all_trades=trades,
+        split_activities=[],
+        redeem_activities=[],
+    )
+
+    assert len(result.trade_sessions) == 2
+    matched = next(session for session in result.trade_sessions if "TERMINAL_FORCE_ZERO_CLOSE" not in session.warning_codes)
+    residual = next(session for session in result.trade_sessions if "TERMINAL_FORCE_ZERO_CLOSE" in session.warning_codes)
+
+    assert round(matched.open_qty, 10) == 15.0
+    assert round(matched.open_avg_price, 6) == 0.333333
+    assert round(matched.close_avg_price, 6) == 0.6
+    assert round(matched.open_notional_usdc, 10) == 5.0
+    assert round(matched.close_notional_usdc, 10) == 9.0
+    assert round(matched.realized_pnl_usdc, 10) == 4.0
+    assert round(matched.return_on_open_notional_pct, 6) == 80.0
+
+    assert round(residual.open_qty, 10) == 5.0
+    assert round(residual.open_avg_price, 6) == 0.2
+    assert round(residual.close_avg_price, 6) == 0.0
+    assert round(residual.realized_pnl_usdc, 10) == -1.0
+    assert round(residual.return_on_open_notional_pct, 6) == -100.0
+    assert "TERMINAL_FORCE_ZERO_CLOSE" in residual.warning_codes
 
 
 def test_session_bucket_aggregation_includes_weighted_returns_and_half_win_ties():
@@ -295,7 +347,7 @@ def test_session_analytics_can_split_all_sessions_into_yes_and_no_groups():
     assert analytics_by_side["NO"].open_hour_buckets[1].session_count == 1
 
 
-def test_profit_engine_builds_true_side_sessions_for_mixed_yes_no_market_session():
+def test_profit_engine_builds_true_side_pairs_for_mixed_yes_no_market():
     market = PolymarketMarket(
         slug="btc-updown-5m-2000",
         condition_id="cond_mixed",
@@ -320,8 +372,8 @@ def test_profit_engine_builds_true_side_sessions_for_mixed_yes_no_market_session
         redeem_activities=[],
     )
 
-    assert len(result.trade_sessions) == 1
-    assert result.trade_sessions[0].entry_side == "YES"
+    assert len(result.trade_sessions) == 2
+    assert {session.entry_side for session in result.trade_sessions} == {"YES", "NO"}
 
     yes_sessions = result.side_trade_sessions["YES"]
     no_sessions = result.side_trade_sessions["NO"]

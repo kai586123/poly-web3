@@ -178,6 +178,20 @@ function buildEmptySessionAnalytics() {
   };
 }
 
+function normalizePnlTurnoverSeries(raw) {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    return [];
+  }
+  return [...raw]
+    .map((p) => ({
+      ts: Number(p.timestamp || 0),
+      cumTurnover: Number(p.cumulative_turnover_usdc || 0),
+      cumPnl: Number(p.cumulative_realized_pnl_usdc || 0),
+      cumPnlNoFee: Number(p.cumulative_realized_pnl_usdc_no_fee || 0),
+    }))
+    .sort((a, b) => a.ts - b.ts);
+}
+
 function normalizeSessionAnalytics(raw) {
   const empty = buildEmptySessionAnalytics();
   if (!raw || typeof raw !== "object") {
@@ -223,6 +237,7 @@ export default function App({ serverDefaults }) {
   const [sideSeries, setSideSeries] = useState({ YES: [], NO: [] });
   const [sideSeriesNoFee, setSideSeriesNoFee] = useState({ YES: [], NO: [] });
   const [drawdownMarkers, setDrawdownMarkers] = useState([]);
+  const [turnoverPnlSeries, setTurnoverPnlSeries] = useState([]);
   const [sessionAnalytics, setSessionAnalytics] = useState(buildEmptySessionAnalytics);
   const [sessionAnalyticsBySide, setSessionAnalyticsBySide] = useState({});
 
@@ -315,6 +330,7 @@ export default function App({ serverDefaults }) {
     setSideSeries({ YES: [], NO: [] });
     setSideSeriesNoFee({ YES: [], NO: [] });
     setDrawdownMarkers([]);
+    setTurnoverPnlSeries([]);
     setSessionAnalytics(buildEmptySessionAnalytics());
     setSessionAnalyticsBySide({});
   }
@@ -454,6 +470,7 @@ export default function App({ serverDefaults }) {
       YES: normalizeSessionAnalytics(report.session_analytics_by_side?.YES),
       NO: normalizeSessionAnalytics(report.session_analytics_by_side?.NO),
     });
+    setTurnoverPnlSeries(normalizePnlTurnoverSeries(report.total_pnl_turnover_curve));
   }
 
   function recomputeTotalSeriesNoFee() {
@@ -711,6 +728,7 @@ export default function App({ serverDefaults }) {
           sideSeries={sideSeries}
           sideSeriesNoFee={sideSeriesNoFee}
           drawdownMarkers={drawdownMarkers}
+          turnoverPnlSeries={turnoverPnlSeries}
         />
 
         <QuantMetricsPanel totalSeries={totalSeries} totalSeriesNoFee={totalSeriesNoFee} markets={markets} />

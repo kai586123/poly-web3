@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.5
+
+- Analysis: **pair-based cycle analytics** per market and YES/NO side (buy accumulation blocks paired with sell reduction blocks, partial legs, terminal forced close at zero for unmatched residual); replaces flat-to-flat session detection. **`MARKET_RESULT_CACHE_SCHEMA_VERSION`** bumped to **6**; per-market cache rows include **`turnover_deltas`**.
+- Analysis: **TRADE turnover** tracking as Σ(**size × price** per fill); **`total_pnl_turnover_curve`** on **`AnalysisReport`** merges timestamps with cumulative net and no-fee PnL (optional anchor row at query **`start_ts`**). Total curve CSV export adds turnover columns when the merged series is present.
+- UI: **PnlCharts** — cumulative turnover vs time, and cumulative PnL vs cumulative turnover (Net / No Fee / Compare on the latter). **InsightCharts** copy updated for pair-cycle terminology.
+- Tests: **`test_turnover_curve.py`**; session analytics tests aligned with the pair model.
+
 ## 1.2.4
 
 - Analysis: CLOB **`/fee-rate`** responses that only expose **`base_fee`** (OpenAPI) are now parsed; fixes silent fallback to the crypto default when the dict omitted legacy keys.
