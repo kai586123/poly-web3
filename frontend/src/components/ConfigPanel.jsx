@@ -52,8 +52,16 @@ export default function ConfigPanel({
       <Form layout="vertical" requiredMark={false} className="config-form">
         <Row gutter={[10, 4]} align="bottom">
           <Col xs={24} lg={11}>
-            <Form.Item label="Address">
-              <Input value={formData.address} onChange={(event) => updateField("address", event.target.value)} />
+            <Form.Item
+              label="Address(es)"
+              extra="One wallet per line or comma-separated; each must start with 0x."
+            >
+              <Input.TextArea
+                rows={2}
+                value={formData.address}
+                onChange={(event) => updateField("address", event.target.value)}
+                placeholder="0x..."
+              />
             </Form.Item>
           </Col>
           <Col xs={24} md={12} lg={7}>

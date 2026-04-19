@@ -110,6 +110,25 @@ function isTruthyQueryFlag(value) {
   return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
 }
 
+function parseWalletAddressesInput(text) {
+  const parts = String(text || "")
+    .split(/[\s,]+/)
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  const seen = new Set();
+  const out = [];
+  for (const a of parts) {
+    if (!a.startsWith("0x")) {
+      continue;
+    }
+    if (!seen.has(a)) {
+      seen.add(a);
+      out.push(a);
+    }
+  }
+  return out;
+}
+
 function parseBootstrapFromQuery(searchText) {
   const params = new URLSearchParams(searchText || "");
   const patch = {};
@@ -133,6 +152,11 @@ function parseBootstrapFromQuery(searchText) {
       patch[formKey] = value;
     }
   });
+
+  const addressesCsv = params.get("addresses");
+  if (addressesCsv !== null && String(addressesCsv).trim() !== "") {
+    patch.address = String(addressesCsv).trim();
+  }
 
   if (!patch.startTime) {
     const startTs = Number(params.get("start_ts"));
@@ -178,20 +202,6 @@ function buildEmptySessionAnalytics() {
   };
 }
 
-function normalizePnlTurnoverSeries(raw) {
-  if (!Array.isArray(raw) || raw.length === 0) {
-    return [];
-  }
-  return [...raw]
-    .map((p) => ({
-      ts: Number(p.timestamp || 0),
-      cumTurnover: Number(p.cumulative_turnover_usdc || 0),
-      cumPnl: Number(p.cumulative_realized_pnl_usdc || 0),
-      cumPnlNoFee: Number(p.cumulative_realized_pnl_usdc_no_fee || 0),
-    }))
-    .sort((a, b) => a.ts - b.ts);
-}
-
 function normalizeSessionAnalytics(raw) {
   const empty = buildEmptySessionAnalytics();
   if (!raw || typeof raw !== "object") {
@@ -234,12 +244,13 @@ export default function App({ serverDefaults }) {
   const [totalSeriesNoFee, setTotalSeriesNoFee] = useState([]);
   const [symbolSeries, setSymbolSeries] = useState({});
   const [symbolSeriesNoFee, setSymbolSeriesNoFee] = useState({});
-  const [sideSeries, setSideSeries] = useState({ YES: [], NO: [] });
   const [sideSeriesNoFee, setSideSeriesNoFee] = useState({ YES: [], NO: [] });
   const [drawdownMarkers, setDrawdownMarkers] = useState([]);
-  const [turnoverPnlSeries, setTurnoverPnlSeries] = useState([]);
+  const [walletSeries, setWalletSeries] = useState({});
+  const [walletSeriesNoFee, setWalletSeriesNoFee] = useState({});
   const [sessionAnalytics, setSessionAnalytics] = useState(buildEmptySessionAnalytics);
   const [sessionAnalyticsBySide, setSessionAnalyticsBySide] = useState({});
+  const [sourceAddresses, setSourceAddresses] = useState([]);
 
   const eventSourceRef = useRef(null);
   const bootstrapHandledRef = useRef(false);
@@ -327,12 +338,13 @@ export default function App({ serverDefaults }) {
     setTotalSeriesNoFee([]);
     setSymbolSeries({});
     setSymbolSeriesNoFee({});
-    setSideSeries({ YES: [], NO: [] });
     setSideSeriesNoFee({ YES: [], NO: [] });
     setDrawdownMarkers([]);
-    setTurnoverPnlSeries([]);
+    setWalletSeries({});
+    setWalletSeriesNoFee({});
     setSessionAnalytics(buildEmptySessionAnalytics());
     setSessionAnalyticsBySide({});
+    setSourceAddresses([]);
   }
 
   function clearRunData() {
@@ -456,21 +468,33 @@ export default function App({ serverDefaults }) {
     }
     setSymbolSeriesNoFee(nextNoFeeSymbolSeries);
 
-    setSideSeries({
-      YES: curvePointsToSeries(report.side_curves?.YES || []),
-      NO: curvePointsToSeries(report.side_curves?.NO || []),
-    });
     setSideSeriesNoFee({
       YES: curvePointsToSeries(report.side_curves_no_fee?.YES || []),
       NO: curvePointsToSeries(report.side_curves_no_fee?.NO || []),
     });
+
+    const wNet = report.wallet_total_curves || {};
+    const wNf = report.wallet_total_curves_no_fee || {};
+    const nextWalletNet = {};
+    const nextWalletNf = {};
+    Object.keys(wNet)
+      .sort()
+      .forEach((addr) => {
+        nextWalletNet[addr] = curvePointsToSeries(wNet[addr] || []);
+      });
+    Object.keys(wNf)
+      .sort()
+      .forEach((addr) => {
+        nextWalletNf[addr] = curvePointsToSeries(wNf[addr] || []);
+      });
+    setWalletSeries(nextWalletNet);
+    setWalletSeriesNoFee(nextWalletNf);
 
     setSessionAnalytics(normalizeSessionAnalytics(report.session_analytics));
     setSessionAnalyticsBySide({
       YES: normalizeSessionAnalytics(report.session_analytics_by_side?.YES),
       NO: normalizeSessionAnalytics(report.session_analytics_by_side?.NO),
     });
-    setTurnoverPnlSeries(normalizePnlTurnoverSeries(report.total_pnl_turnover_curve));
   }
 
   function recomputeTotalSeriesNoFee() {
@@ -526,6 +550,7 @@ export default function App({ serverDefaults }) {
 
     setMarkets((report.markets || []).filter(hasTradeActivity));
     setSummary(report.summary || EMPTY_SUMMARY);
+    setSourceAddresses(Array.isArray(report.source_addresses) ? report.source_addresses : []);
     setDownloads(report.artifacts || null);
     if (Array.isArray(report.warnings)) {
       const warningTexts = report.warnings
@@ -631,8 +656,14 @@ export default function App({ serverDefaults }) {
       throw new Error("end time must be later than start time");
     }
 
+    const addresses = parseWalletAddressesInput(sourceFormData.address);
+    if (!addresses.length) {
+      throw new Error("enter at least one wallet address starting with 0x");
+    }
+
     return {
-      address: sourceFormData.address.trim(),
+      address: addresses[0],
+      ...(addresses.length > 1 ? { addresses } : {}),
       start_ts: startTs,
       end_ts: endTs,
       symbols: sourceFormData.symbols
@@ -725,10 +756,10 @@ export default function App({ serverDefaults }) {
           totalSeriesNoFee={totalSeriesNoFee}
           symbolSeries={symbolSeries}
           symbolSeriesNoFee={symbolSeriesNoFee}
-          sideSeries={sideSeries}
           sideSeriesNoFee={sideSeriesNoFee}
           drawdownMarkers={drawdownMarkers}
-          turnoverPnlSeries={turnoverPnlSeries}
+          walletSeries={walletSeries}
+          walletSeriesNoFee={walletSeriesNoFee}
         />
 
         <QuantMetricsPanel totalSeries={totalSeries} totalSeriesNoFee={totalSeriesNoFee} markets={markets} />
@@ -737,6 +768,7 @@ export default function App({ serverDefaults }) {
           sessionAnalytics={sessionAnalytics}
           sessionAnalyticsBySide={sessionAnalyticsBySide}
           peakNotionalCapUsdc={formData.peakNotionalCapUsdc}
+          sourceAddresses={sourceAddresses}
         />
 
         <MarketTable markets={markets} />

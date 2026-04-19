@@ -34,6 +34,7 @@ from .models import (
 from .polymarket_client import PolymarketApiClient
 from .raw_api_cache import RawPolymarketDataCache
 from .profit_engine import PnlDelta, ProfitEngine, TurnoverDelta, build_curve, build_pnl_turnover_timeline
+from .report_merge import merge_analysis_reports
 from .slugs import MarketSlugSpec, generate_market_slug_specs
 
 MARKET_FETCH_CONCURRENCY_DEFAULT = 10
@@ -96,7 +97,13 @@ class _MarketProcessResult:
 class AnalyzerHooks(Protocol):
     async def on_run_started(self, total_markets: int) -> None: ...
 
-    async def on_progress(self, current: int, total: int, market_slug: str) -> None: ...
+    async def on_progress(
+        self,
+        current: int,
+        total: int,
+        market_slug: str,
+        wallet_address: str | None = None,
+    ) -> None: ...
 
     async def on_warning(self, warning: WarningItem) -> None: ...
 
@@ -117,7 +124,13 @@ class NullHooks:
     async def on_run_started(self, total_markets: int) -> None:
         return
 
-    async def on_progress(self, current: int, total: int, market_slug: str) -> None:
+    async def on_progress(
+        self,
+        current: int,
+        total: int,
+        market_slug: str,
+        wallet_address: str | None = None,
+    ) -> None:
         return
 
     async def on_warning(self, warning: WarningItem) -> None:
@@ -140,6 +153,63 @@ class NullHooks:
         return
 
 
+class MultiWalletRunHooks:
+    """Scales progress across sequential per-wallet analyzer passes."""
+
+    def __init__(
+        self,
+        inner: AnalyzerHooks,
+        wallet_index: int,
+        wallet_count: int,
+        total_markets: int,
+        wallet_address: str,
+    ):
+        self._inner = inner
+        self._wallet_index = wallet_index
+        self._wallet_count = max(1, wallet_count)
+        self._total_markets = total_markets
+        self._wallet_address = wallet_address
+
+    async def on_run_started(self, total_markets: int) -> None:
+        if self._wallet_index != 0:
+            return
+        await self._inner.on_run_started(total_markets * self._wallet_count)
+
+    async def on_progress(
+        self,
+        current: int,
+        total: int,
+        market_slug: str,
+        wallet_address: str | None = None,
+    ) -> None:
+        offset = self._wallet_index * self._total_markets
+        await self._inner.on_progress(
+            offset + current,
+            self._total_markets * self._wallet_count,
+            market_slug,
+            self._wallet_address,
+        )
+
+    async def on_warning(self, warning: WarningItem) -> None:
+        await self._inner.on_warning(warning)
+
+    async def on_total_point(self, timestamp: int, delta: float, cumulative: float) -> None:
+        await self._inner.on_total_point(timestamp, delta, cumulative)
+
+    async def on_market_point(
+        self, market_slug: str, timestamp: int, delta: float, cumulative: float
+    ) -> None:
+        await self._inner.on_market_point(market_slug, timestamp, delta, cumulative)
+
+    async def on_total_point_no_fee(self, timestamp: int, delta: float, cumulative: float) -> None:
+        await self._inner.on_total_point_no_fee(timestamp, delta, cumulative)
+
+    async def on_market_point_no_fee(
+        self, market_slug: str, timestamp: int, delta: float, cumulative: float
+    ) -> None:
+        await self._inner.on_market_point_no_fee(market_slug, timestamp, delta, cumulative)
+
+
 class PolymarketProfitAnalyzer:
     def __init__(self):
         self._market_cache = MarketMetadataCache()
@@ -151,7 +221,7 @@ class PolymarketProfitAnalyzer:
         req: AnalysisRequest,
         stop_event: asyncio.Event | None = None,
         hooks: AnalyzerHooks | None = None,
-    ) -> AnalysisReport:
+    ) -> tuple[AnalysisReport, list[AnalysisReport]]:
         stop_event = stop_event or asyncio.Event()
         hooks = hooks or NullHooks()
 
@@ -189,6 +259,52 @@ class PolymarketProfitAnalyzer:
             apply_maker_reward=False,
         )
 
+        fee_rate_bps_cache: dict[str, float] = {}
+
+        try:
+            specs = generate_market_slug_specs(req.symbols, req.intervals, req.start_ts, req.end_ts)
+            addrs = list(req.addresses or [])
+            if not addrs:
+                raise ValueError("addresses required")
+            if len(addrs) == 1:
+                report = await self._run_single_address(
+                    req, client, engine, engine_no_fee, hooks, stop_event, specs, fee_rate_bps_cache
+                )
+                return report, []
+
+            wallet_reports: list[AnalysisReport] = []
+            for i, addr in enumerate(addrs):
+                if stop_event.is_set():
+                    break
+                sub = req.model_copy(update={"address": addr, "addresses": [addr]})
+                sub_hooks = MultiWalletRunHooks(hooks, i, len(addrs), len(specs), addr)
+                wr = await self._run_single_address(
+                    sub, client, engine, engine_no_fee, sub_hooks, stop_event, specs, fee_rate_bps_cache
+                )
+                wallet_reports.append(wr)
+
+            if not wallet_reports:
+                raise RuntimeError("multi-wallet run produced no reports")
+
+            merge_addrs = addrs[: len(wallet_reports)]
+            merged = merge_analysis_reports(wallet_reports, req, merge_addrs)
+            if len(wallet_reports) < len(addrs):
+                merged = merged.model_copy(update={"is_partial": True})
+            return merged, wallet_reports
+        finally:
+            await client.aclose()
+
+    async def _run_single_address(
+        self,
+        req: AnalysisRequest,
+        client: PolymarketApiClient,
+        engine: ProfitEngine,
+        engine_no_fee: ProfitEngine,
+        hooks: AnalyzerHooks,
+        stop_event: asyncio.Event,
+        specs: list[MarketSlugSpec],
+        fee_rate_bps_cache: dict[str, float],
+    ) -> AnalysisReport:
         all_warnings: list[WarningItem] = []
         market_reports: list[MarketReport] = []
         market_scatter_points: list[MarketScatterPoint] = []
@@ -211,10 +327,8 @@ class PolymarketProfitAnalyzer:
         total_running_pnl_no_fee = 0.0
         market_running_pnl: dict[str, float] = defaultdict(float)
         market_running_pnl_no_fee: dict[str, float] = defaultdict(float)
-        fee_rate_bps_cache: dict[str, float] = {}
 
         try:
-            specs = generate_market_slug_specs(req.symbols, req.intervals, req.start_ts, req.end_ts)
             total_markets = len(specs)
             spec_chunks = _chunk_specs_by_timestamp(specs, self._timestamp_chunk_size)
             logger.info(
@@ -472,8 +586,10 @@ class PolymarketProfitAnalyzer:
                 for side in ("YES", "NO")
             }
 
+            addr = str(req.address) if req.address else ""
             report = AnalysisReport(
                 request=req,
+                source_addresses=[addr] if addr else [],
                 summary=summary,
                 markets=sorted(market_reports, key=lambda x: x.market_slug),
                 total_curve=total_curve,
@@ -489,11 +605,12 @@ class PolymarketProfitAnalyzer:
                 market_scatter=sorted(market_scatter_points, key=lambda x: x.market_slug),
                 session_analytics=session_analytics,
                 session_analytics_by_side=session_analytics_by_side,
+                per_wallet=None,
             )
 
             return report
         finally:
-            await client.aclose()
+            pass
 
     async def _fetch_markets_with_status(
         self,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -49,19 +50,28 @@ class RunHooks(AnalyzerHooks):
             {"run_id": self._run_id, "progress_total": total_markets},
         )
 
-    async def on_progress(self, current: int, total: int, market_slug: str) -> None:
+    async def on_progress(
+        self,
+        current: int,
+        total: int,
+        market_slug: str,
+        wallet_address: str | None = None,
+    ) -> None:
         ctx = self._manager._runs[self._run_id]
         ctx.state.progress_current = current
         ctx.state.progress_total = total
         ctx.state.message = market_slug
+        payload: dict = {
+            "current": current,
+            "total": total,
+            "market_slug": market_slug,
+        }
+        if wallet_address:
+            payload["wallet_address"] = wallet_address
         await self._manager._emit(
             self._run_id,
             "progress",
-            {
-                "current": current,
-                "total": total,
-                "market_slug": market_slug,
-            },
+            payload,
         )
 
     async def on_warning(self, warning: WarningItem) -> None:
@@ -152,9 +162,9 @@ class RunManager:
 
             ctx.task = asyncio.create_task(self._execute_run(run_id, req))
             logger.info(
-                "create run run_id={} address={} range=[{}, {}] symbols={} intervals={}",
+                "create run run_id={} addresses={} range=[{}, {}] symbols={} intervals={}",
                 run_id,
-                req.address,
+                ",".join(req.addresses or ([req.address] if req.address else [])),
                 req.start_ts,
                 req.end_ts,
                 ",".join(req.symbols),
@@ -215,11 +225,20 @@ class RunManager:
             ctx.state.started_at = utc_now()
             logger.info("run started run_id={}", run_id)
 
-            report = await self._analyzer.run(req=req, stop_event=ctx.stop_event, hooks=hooks)
+            report, wallet_reports = await self._analyzer.run(req=req, stop_event=ctx.stop_event, hooks=hooks)
 
             output_dir = Path(req.output_dir)
             output_dir.mkdir(parents=True, exist_ok=True)
             suffix = f"{run_id}_{'partial' if report.is_partial else 'final'}"
+
+            if wallet_reports:
+                for idx, wr in enumerate(wallet_reports):
+                    addr = (wr.source_addresses[0] if wr.source_addresses else f"w{idx}").lower()
+                    safe = re.sub(r"[^a-z0-9]", "_", addr)[:20]
+                    self._analyzer.save_json(
+                        wr,
+                        str(output_dir / f"pnl_summary_{suffix}_wallet{idx}_{safe}.json"),
+                    )
 
             json_path = self._analyzer.save_json(report, str(output_dir / f"pnl_summary_{suffix}.json"))
             total_csv_path = self._analyzer.save_total_curve_csv(
@@ -321,9 +340,19 @@ def _compact_report_for_ui(report: AnalysisReport) -> AnalysisReport:
         update={
             "total_curve": _sample_points_evenly(report.total_curve, UI_MAX_TOTAL_CURVE_POINTS),
             "total_curve_no_fee": _sample_points_evenly(report.total_curve_no_fee, UI_MAX_TOTAL_CURVE_POINTS),
+            "total_pnl_turnover_curve": _sample_points_evenly(
+                report.total_pnl_turnover_curve,
+                UI_MAX_TOTAL_CURVE_POINTS,
+            ),
             "side_curves": _sample_curve_dict(report.side_curves, UI_MAX_SIDE_CURVE_POINTS),
             "side_curves_no_fee": _sample_curve_dict(report.side_curves_no_fee, UI_MAX_SIDE_CURVE_POINTS),
             "market_curves": _sample_curve_dict(report.market_curves, UI_MAX_MARKET_CURVE_POINTS),
             "market_curves_no_fee": _sample_curve_dict(report.market_curves_no_fee, UI_MAX_MARKET_CURVE_POINTS),
+            "wallet_total_curves": _sample_curve_dict(report.wallet_total_curves, UI_MAX_TOTAL_CURVE_POINTS),
+            "wallet_total_curves_no_fee": _sample_curve_dict(
+                report.wallet_total_curves_no_fee,
+                UI_MAX_TOTAL_CURVE_POINTS,
+            ),
+            "per_wallet": None,
         }
     )

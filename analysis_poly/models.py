@@ -18,8 +18,21 @@ class RunStatus(str, Enum):
     FAILED = "FAILED"
 
 
+MAX_ANALYSIS_WALLETS = 20
+
+
+def _normalize_wallet_address(value: str) -> str:
+    lowered = value.lower().strip()
+    if not lowered.startswith("0x"):
+        raise ValueError("address must start with 0x")
+    return lowered
+
+
 class AnalysisRequest(BaseModel):
-    address: str
+    """Either `address` (single) or non-empty `addresses` (multi). When both are set, `addresses` wins."""
+
+    address: str | None = Field(default=None)
+    addresses: list[str] | None = Field(default=None)
     start_ts: int
     end_ts: int
     symbols: list[Literal["btc", "eth", "sol", "xrp"]]
@@ -34,11 +47,28 @@ class AnalysisRequest(BaseModel):
 
     @field_validator("address")
     @classmethod
-    def validate_address(cls, value: str) -> str:
-        lowered = value.lower().strip()
-        if not lowered.startswith("0x"):
-            raise ValueError("address must start with 0x")
-        return lowered
+    def validate_address(cls, value: str | None) -> str | None:
+        if value is None or str(value).strip() == "":
+            return None
+        return _normalize_wallet_address(value)
+
+    @field_validator("addresses")
+    @classmethod
+    def validate_addresses(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        if len(value) == 0:
+            return None
+        seen: set[str] = set()
+        out: list[str] = []
+        for raw in value:
+            a = _normalize_wallet_address(str(raw))
+            if a not in seen:
+                seen.add(a)
+                out.append(a)
+        if len(out) > MAX_ANALYSIS_WALLETS:
+            raise ValueError(f"at most {MAX_ANALYSIS_WALLETS} wallet addresses allowed")
+        return out
 
     @field_validator("symbols")
     @classmethod
@@ -61,6 +91,12 @@ class AnalysisRequest(BaseModel):
     def validate_time_range(self) -> "AnalysisRequest":
         if self.start_ts >= self.end_ts:
             raise ValueError("start_ts must be smaller than end_ts")
+        if self.addresses:
+            object.__setattr__(self, "address", self.addresses[0])
+        elif self.address:
+            object.__setattr__(self, "addresses", [self.address])
+        else:
+            raise ValueError("provide address or non-empty addresses")
         return self
 
 
@@ -88,6 +124,7 @@ class WarningItem(BaseModel):
     timestamp: int | None = None
     market_slug: str | None = None
     token_id: str | None = None
+    source_address: str | None = None
     code: str
     message: str
 
@@ -175,6 +212,7 @@ class TradeSession(BaseModel):
     is_chart_eligible: bool = False
     exclusion_reason: str | None = None
     warning_codes: list[str] = Field(default_factory=list)
+    source_address: str | None = None
 
 
 class SessionOpenHourBucket(BaseModel):
@@ -234,6 +272,7 @@ class SessionAnalytics(BaseModel):
 
 class AnalysisReport(BaseModel):
     request: AnalysisRequest
+    source_addresses: list[str] = Field(default_factory=list)
     summary: SummaryStats
     markets: list[MarketReport]
     total_curve: list[CurvePoint]
@@ -253,6 +292,18 @@ class AnalysisReport(BaseModel):
     market_scatter: list[MarketScatterPoint] = Field(default_factory=list)
     session_analytics: SessionAnalytics = Field(default_factory=SessionAnalytics)
     session_analytics_by_side: dict[Literal["YES", "NO"], SessionAnalytics] = Field(default_factory=dict)
+    wallet_total_curves: dict[str, list[CurvePoint]] = Field(
+        default_factory=dict,
+        description="Per-wallet cumulative net PnL curves; set only for multi-wallet merged reports.",
+    )
+    wallet_total_curves_no_fee: dict[str, list[CurvePoint]] = Field(
+        default_factory=dict,
+        description="Per-wallet cumulative no-fee PnL curves; set only for multi-wallet merged reports.",
+    )
+    per_wallet: dict[str, "AnalysisReport"] | None = Field(
+        default=None,
+        description="Populated only when returning full merged payload; omitted in compact API responses.",
+    )
 
 
 class PolymarketMarket(BaseModel):

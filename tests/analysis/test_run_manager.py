@@ -13,14 +13,17 @@ def test_single_run_lock_conflict(monkeypatch):
 
         async def fake_run(req, stop_event=None, hooks=None):
             await asyncio.sleep(0.2)
-            return AnalysisReport(
-                request=req,
-                summary=SummaryStats(markets_total=1, markets_processed=1),
-                markets=[],
-                total_curve=[],
-                market_curves={},
-                warnings=[],
-                is_partial=False,
+            return (
+                AnalysisReport(
+                    request=req,
+                    summary=SummaryStats(markets_total=1, markets_processed=1),
+                    markets=[],
+                    total_curve=[],
+                    market_curves={},
+                    warnings=[],
+                    is_partial=False,
+                ),
+                [],
             )
 
         monkeypatch.setattr(manager._analyzer, "run", fake_run)
@@ -48,14 +51,17 @@ def test_stop_run_updates_status(monkeypatch):
         async def fake_run(req, stop_event=None, hooks=None):
             while not stop_event.is_set():
                 await asyncio.sleep(0.05)
-            return AnalysisReport(
-                request=req,
-                summary=SummaryStats(markets_total=1, markets_processed=0),
-                markets=[],
-                total_curve=[],
-                market_curves={},
-                warnings=[],
-                is_partial=True,
+            return (
+                AnalysisReport(
+                    request=req,
+                    summary=SummaryStats(markets_total=1, markets_processed=0),
+                    markets=[],
+                    total_curve=[],
+                    market_curves={},
+                    warnings=[],
+                    is_partial=True,
+                ),
+                [],
             )
 
         monkeypatch.setattr(manager._analyzer, "run", fake_run)

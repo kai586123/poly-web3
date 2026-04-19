@@ -36,6 +36,7 @@ def _build_bootstrap_query(args: argparse.Namespace) -> dict[str, str]:
 
     mapping = {
         "address": "address",
+        "addresses": "addresses",
         "symbols": "symbols",
         "intervals": "intervals",
         "start_time": "start_time",
@@ -47,10 +48,14 @@ def _build_bootstrap_query(args: argparse.Namespace) -> dict[str, str]:
         "page_limit": "page_limit",
     }
     for arg_key, query_key in mapping.items():
-        value = getattr(args, arg_key)
+        value = getattr(args, arg_key, None)
         if value is None:
             continue
         params[query_key] = str(value)
+
+    # Multi-wallet bootstrap uses `addresses` query; drop redundant single `address` param.
+    if "addresses" in params:
+        params.pop("address", None)
 
     if args.start_ts is not None and "start_time" not in params:
         params["start_time"] = _to_datetime_text(args.start_ts)
@@ -61,6 +66,7 @@ def _build_bootstrap_query(args: argparse.Namespace) -> dict[str, str]:
         key in params
         for key in {
             "address",
+            "addresses",
             "symbols",
             "intervals",
             "start_time",
@@ -105,7 +111,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=8000, help="Bind port for web server")
     parser.add_argument("--browser-timeout-sec", type=float, default=20.0, help="Wait timeout for browser auto-open")
 
-    parser.add_argument("--address")
+    parser.add_argument("--address", help="Single wallet (0x…). Ignored if --addresses is set.")
+    parser.add_argument(
+        "--addresses",
+        help='Multiple wallets: comma- or space-separated 0x… list (passed to UI as ?addresses=…)',
+    )
     parser.add_argument("--symbols", help='Comma-separated, e.g. "btc,eth,sol"')
     parser.add_argument("--intervals", help='Comma-separated, e.g. "5,15"')
     parser.add_argument("--start-time", help='Local datetime, format "YYYY-MM-DD HH:MM"')

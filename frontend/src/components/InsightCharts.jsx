@@ -1,7 +1,7 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import * as echarts from "echarts";
 import ReactECharts from "echarts-for-react";
-import { Card, Col, Divider, Row, Typography } from "antd";
+import { Card, Col, Divider, Row, Select, Typography } from "antd";
 
 const { Text, Title } = Typography;
 
@@ -54,6 +54,162 @@ function sessionWinScore(s) {
     return 0;
   }
   return 0.5;
+}
+
+const SESSION_PRICE_BIN_WIDTH = 0.01;
+const SESSION_PRICE_BIN_COUNT = 100;
+
+function marketOrderKey(slug) {
+  try {
+    const parts = String(slug || "").split("-");
+    const last = parts[parts.length - 1];
+    const n = parseInt(last, 10);
+    if (Number.isFinite(n)) {
+      return n;
+    }
+  } catch {
+    /* ignore */
+  }
+  return 1e18;
+}
+
+function sortTradeSessions(sessions) {
+  return [...sessions].sort((a, b) => {
+    const mk = marketOrderKey(a.market_slug) - marketOrderKey(b.market_slug);
+    if (mk !== 0) {
+      return mk;
+    }
+    const st = Number(a.start_timestamp || 0) - Number(b.start_timestamp || 0);
+    if (st !== 0) {
+      return st;
+    }
+    return Number(a.end_timestamp || 0) - Number(b.end_timestamp || 0);
+  });
+}
+
+function priceBucketIndex(price) {
+  const clamped = Math.max(0, Math.min(Number(price), 1));
+  if (clamped >= 1) {
+    return SESSION_PRICE_BIN_COUNT - 1;
+  }
+  return Math.min(
+    SESSION_PRICE_BIN_COUNT - 1,
+    Math.max(0, Math.floor(clamped / SESSION_PRICE_BIN_WIDTH)),
+  );
+}
+
+function buildDiagnosticsFromSessions(sessions) {
+  const d = {
+    total_detected_sessions: sessions.length,
+    closed_sessions: sessions.length,
+    chart_eligible_sessions: 0,
+    excluded_open_session_count: 0,
+    excluded_no_trade_entry_count: 0,
+    excluded_zero_open_notional_count: 0,
+    excluded_warning_session_count: 0,
+  };
+  for (const s of sessions) {
+    if (s.is_chart_eligible) {
+      d.chart_eligible_sessions += 1;
+    } else if (s.exclusion_reason === "no_trade_entry") {
+      d.excluded_no_trade_entry_count += 1;
+    } else if (s.exclusion_reason === "zero_open_notional") {
+      d.excluded_zero_open_notional_count += 1;
+    } else {
+      d.excluded_warning_session_count += 1;
+    }
+  }
+  return d;
+}
+
+/** Rebuild hour/price buckets from trade sessions (matches backend session analytics logic). */
+function rebuildSessionAnalyticsFromTradeSessions(sessions) {
+  const ordered = sortTradeSessions(sessions);
+  const diagnostics = buildDiagnosticsFromSessions(ordered);
+
+  const hourAcc = {};
+  for (let hour = 0; hour < 24; hour += 1) {
+    hourAcc[hour] = { count: 0, sumPnl: 0, sumNotional: 0, sumReturn: 0, sumWinScore: 0 };
+  }
+
+  const priceAcc = new Map();
+
+  for (const session of ordered) {
+    if (
+      !session.is_chart_eligible ||
+      session.open_hour_utc == null ||
+      session.open_avg_price == null ||
+      session.return_on_open_notional_pct == null
+    ) {
+      continue;
+    }
+    const h = Number(session.open_hour_utc);
+    const hourStats = hourAcc[h];
+    hourStats.count += 1;
+    hourStats.sumPnl += Number(session.realized_pnl_usdc || 0);
+    hourStats.sumNotional += Number(session.open_notional_usdc || 0);
+    hourStats.sumReturn += Number(session.return_on_open_notional_pct || 0);
+    hourStats.sumWinScore += sessionWinScore(session);
+
+    const pIdx = priceBucketIndex(session.open_avg_price);
+    if (!priceAcc.has(pIdx)) {
+      priceAcc.set(pIdx, { count: 0, sumPnl: 0, sumNotional: 0, sumReturn: 0, sumWinScore: 0 });
+    }
+    const pStats = priceAcc.get(pIdx);
+    pStats.count += 1;
+    pStats.sumPnl += Number(session.realized_pnl_usdc || 0);
+    pStats.sumNotional += Number(session.open_notional_usdc || 0);
+    pStats.sumReturn += Number(session.return_on_open_notional_pct || 0);
+    pStats.sumWinScore += sessionWinScore(session);
+  }
+
+  const openHourBuckets = Array.from({ length: 24 }, (_, hour) => {
+    const stats = hourAcc[hour];
+    const cnt = stats.count;
+    const sumNotional = stats.sumNotional;
+    const wr = sumNotional > 1e-12 ? (stats.sumPnl / sumNotional) * 100 : 0;
+    const ar = cnt ? stats.sumReturn / cnt : 0;
+    const winr = cnt ? (stats.sumWinScore / cnt) * 100 : 0;
+    return {
+      hour_utc: hour,
+      session_count: cnt,
+      weighted_return_on_open_notional_pct: Math.round(wr * 1e6) / 1e6,
+      average_return_on_open_notional_pct: Math.round(ar * 1e6) / 1e6,
+      win_rate_pct: Math.round(winr * 1e6) / 1e6,
+      sum_realized_pnl_usdc: Math.round(stats.sumPnl * 1e10) / 1e10,
+      sum_open_notional_usdc: Math.round(stats.sumNotional * 1e10) / 1e10,
+    };
+  });
+
+  const openPriceBuckets = [...priceAcc.keys()]
+    .sort((a, b) => a - b)
+    .map((idx) => {
+      const stats = priceAcc.get(idx);
+      const cnt = stats.count;
+      const sumNotional = stats.sumNotional;
+      const wr = sumNotional > 1e-12 ? (stats.sumPnl / sumNotional) * 100 : 0;
+      const ar = cnt ? stats.sumReturn / cnt : 0;
+      const winr = cnt ? (stats.sumWinScore / cnt) * 100 : 0;
+      return {
+        bin_index: idx,
+        bin_start_price: Math.round(idx * SESSION_PRICE_BIN_WIDTH * 100) / 100,
+        bin_end_price: Math.round(Math.min(1, (idx + 1) * SESSION_PRICE_BIN_WIDTH) * 100) / 100,
+        session_count: cnt,
+        weighted_return_on_open_notional_pct: Math.round(wr * 1e6) / 1e6,
+        average_return_on_open_notional_pct: Math.round(ar * 1e6) / 1e6,
+        win_rate_pct: Math.round(winr * 1e6) / 1e6,
+        sum_realized_pnl_usdc: Math.round(stats.sumPnl * 1e10) / 1e10,
+        sum_open_notional_usdc: Math.round(stats.sumNotional * 1e10) / 1e10,
+      };
+    });
+
+  return {
+    diagnostics,
+    trade_sessions: ordered,
+    open_hour_buckets: openHourBuckets,
+    open_price_buckets: openPriceBuckets,
+    open_peak_notional_buckets: [],
+  };
 }
 
 function buildPeakDisplayBuckets(tradeSessions, capInput) {
@@ -847,20 +1003,79 @@ function SessionAnalyticsSection({ sectionLabel = "ALL", sessionAnalytics, peakN
   );
 }
 
-export default function InsightCharts({ sessionAnalytics, sessionAnalyticsBySide = {}, peakNotionalCapUsdc = "" }) {
+export default function InsightCharts({
+  sessionAnalytics,
+  sessionAnalyticsBySide = {},
+  peakNotionalCapUsdc = "",
+  sourceAddresses: rawSourceAddresses = [],
+}) {
+  const sourceAddresses = Array.isArray(rawSourceAddresses) ? rawSourceAddresses : [];
+  const [walletFilter, setWalletFilter] = useState("all");
+
+  useEffect(() => {
+    setWalletFilter("all");
+  }, [sourceAddresses.join(",")]);
+
+  const hasProvenance =
+    sourceAddresses.length > 1 && (sessionAnalytics?.trade_sessions || []).some((s) => s.source_address);
+
+  const filteredAll = useMemo(() => {
+    const list = sessionAnalytics?.trade_sessions || [];
+    if (!hasProvenance || walletFilter === "all") {
+      return sessionAnalytics;
+    }
+    const filt = list.filter((s) => s.source_address === walletFilter);
+    return rebuildSessionAnalyticsFromTradeSessions(filt);
+  }, [hasProvenance, walletFilter, sessionAnalytics]);
+
+  const filteredBySide = useMemo(() => {
+    if (!hasProvenance || walletFilter === "all") {
+      return sessionAnalyticsBySide;
+    }
+    const yesList = sessionAnalyticsBySide?.YES?.trade_sessions || [];
+    const noList = sessionAnalyticsBySide?.NO?.trade_sessions || [];
+    return {
+      YES: rebuildSessionAnalyticsFromTradeSessions(yesList.filter((s) => s.source_address === walletFilter)),
+      NO: rebuildSessionAnalyticsFromTradeSessions(noList.filter((s) => s.source_address === walletFilter)),
+    };
+  }, [hasProvenance, walletFilter, sessionAnalyticsBySide]);
+
+  const cardTitle = (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
+      <span style={{ fontWeight: 600 }}>Pair-cycle analytics</span>
+      {sourceAddresses.length > 1 ? (
+        <Text type="secondary" style={{ fontSize: 12, maxWidth: 560 }}>
+          Portfolio view stacks sessions from each wallet; multi-wallet runs also write per-wallet JSON next to the merged export.
+        </Text>
+      ) : null}
+      {hasProvenance ? (
+        <Select
+          size="small"
+          value={walletFilter}
+          onChange={setWalletFilter}
+          style={{ minWidth: 260 }}
+          options={[
+            { value: "all", label: "All wallets" },
+            ...sourceAddresses.map((addr) => ({ value: addr, label: addr })),
+          ]}
+        />
+      ) : null}
+    </div>
+  );
+
   return (
-    <Card className="chart-card insight-charts-card" bodyStyle={{ padding: 12 }} title="Pair-cycle analytics">
-      <SessionAnalyticsSection sectionLabel="ALL" sessionAnalytics={sessionAnalytics} peakNotionalCapUsdc={peakNotionalCapUsdc} />
+    <Card className="chart-card insight-charts-card" bodyStyle={{ padding: 12 }} title={cardTitle}>
+      <SessionAnalyticsSection sectionLabel="ALL" sessionAnalytics={filteredAll} peakNotionalCapUsdc={peakNotionalCapUsdc} />
       <Divider style={{ margin: "18px 0" }} />
       <SessionAnalyticsSection
         sectionLabel="YES"
-        sessionAnalytics={sessionAnalyticsBySide?.YES}
+        sessionAnalytics={filteredBySide?.YES}
         peakNotionalCapUsdc={peakNotionalCapUsdc}
       />
       <Divider style={{ margin: "18px 0" }} />
       <SessionAnalyticsSection
         sectionLabel="NO"
-        sessionAnalytics={sessionAnalyticsBySide?.NO}
+        sessionAnalytics={filteredBySide?.NO}
         peakNotionalCapUsdc={peakNotionalCapUsdc}
       />
     </Card>
