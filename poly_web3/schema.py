@@ -15,6 +15,7 @@ class WalletType(str, Enum):
     EOA = "EOA"
     SAFE = "SAFE"
     PROXY = "PROXY"
+    DEPOSIT_WALLET = "DEPOSIT_WALLET"   # POLY_1271 (CLOB signature_type=3)
 
     @classmethod
     def get_with_code(cls, code: int):
@@ -24,6 +25,8 @@ class WalletType(str, Enum):
             return cls.PROXY
         elif code == 2:
             return cls.SAFE
+        elif code == 3:
+            return cls.DEPOSIT_WALLET
 
 
 class RedeemErrorItem(BaseModel):

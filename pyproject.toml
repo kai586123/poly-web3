@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "poly-web3"
-version = "1.2.5"
-description = "Polymarket monorepo: redeem/split/merge SDK, profit web analyzer, and position watcher"
+version = "1.3.0"
+description = "Polymarket monorepo: redeem/split/merge SDK (Polymarket v2 / pUSD), profit web analyzer, and position watcher"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -35,8 +35,8 @@ dependencies = [
     "httpx>=0.28.1",
     "jinja2>=3.1.6",
     "loguru>=0.7.3",
-    "py-builder-relayer-client>=0.0.1",
-    "py-clob-client>=0.25.0",
+    "py-builder-relayer-client>=0.0.2rc1",
+    "py-clob-client-v2>=1.0.0",
     "pydantic>=2.11.0",
     "rich>=14.2.0",
     "setuptools>=80.9.0",
