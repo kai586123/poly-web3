@@ -5,12 +5,17 @@ import { Button, Card, Col, Row, Segmented, Space } from "antd";
 import { COLOR_PALETTE } from "../constants";
 import { symbolColor } from "../utils/format";
 
-function axisTimeLabel(value) {
-  return dayjs(Number(value) * 1000).format("MM/DD HH:mm");
+/** ECharts time-axis tooltip passes ms; category/value may use unix seconds. */
+function axisValueToUnixSeconds(axisValue) {
+  const n = Number(axisValue);
+  if (!Number.isFinite(n)) {
+    return 0;
+  }
+  return n > 1e12 ? n / 1000 : n;
 }
 
-function tooltipTimeLabel(value) {
-  return dayjs(Number(value) * 1000).format("YYYY-MM-DD HH:mm:ss");
+function tooltipTimeLabel(valueUnixSec) {
+  return dayjs(Number(valueUnixSec) * 1000).format("YYYY-MM-DD HH:mm:ss");
 }
 
 function formatLossUsdc(value) {
@@ -33,7 +38,7 @@ function tooltipFormatter(params, drawdownByTs) {
   if (!rows.length) {
     return "";
   }
-  const ts = Number(rows[0].axisValue);
+  const ts = axisValueToUnixSeconds(rows[0].axisValue);
   const lines = [`Time: ${tooltipTimeLabel(ts)}`];
   for (const row of rows) {
     const marker = row.marker || "";
@@ -42,8 +47,9 @@ function tooltipFormatter(params, drawdownByTs) {
     const display = value == null ? "-" : Number(value).toFixed(4);
     lines.push(`${marker} ${seriesName}: ${display}`);
   }
-  if (drawdownByTs?.has(ts)) {
-    const markers = drawdownByTs.get(ts) || [];
+  const tsKey = Math.round(ts);
+  if (drawdownByTs?.has(tsKey)) {
+    const markers = drawdownByTs.get(tsKey) || [];
     if (markers.length) {
       lines.push("---");
       lines.push("Drawdown Events:");
@@ -63,19 +69,23 @@ function seriesMap(points) {
   return map;
 }
 
-function alignedSeriesData(map, xData) {
+/** [unixMs, y] pairs for ECharts `time` x-axis; forward-fill cumulative PnL between sampled times. */
+function alignedTimeSeriesData(map, xDataSeconds) {
+  const out = [];
   let started = false;
   let lastValue = null;
-  return xData.map((ts) => {
-    if (map.has(ts)) {
+  for (const ts of xDataSeconds) {
+    const tsn = Number(ts);
+    if (map.has(tsn)) {
       started = true;
-      lastValue = map.get(ts);
+      lastValue = map.get(tsn);
     }
     if (!started) {
-      return null;
+      continue;
     }
-    return lastValue;
-  });
+    out.push([tsn * 1000, lastValue]);
+  }
+  return out;
 }
 
 function unionSortedTimestamps(...maps) {
@@ -221,7 +231,7 @@ export default function PnlCharts({
           cap: "round",
           join: "round",
         },
-        data: alignedSeriesData(netMap, xData),
+        data: alignedTimeSeriesData(netMap, xData),
       };
 
       if (showDrawdownMarks) {
@@ -230,23 +240,21 @@ export default function PnlCharts({
             if (!netMap.has(marker.ts)) {
               return null;
             }
-            const tsIndex = xData.indexOf(marker.ts);
-            if (tsIndex < 0) {
-              return null;
-            }
+            const tsSec = Number(marker.ts);
             return {
-              coord: [tsIndex, netMap.get(marker.ts)],
-              ts: marker.ts,
+              coord: [tsSec * 1000, netMap.get(marker.ts)],
+              ts: tsSec,
               slug: marker.marketSlug,
               drawdown: marker.delta,
             };
           })
           .filter(Boolean);
         markerData.forEach((marker) => {
-          if (!drawdownByTs.has(marker.ts)) {
-            drawdownByTs.set(marker.ts, []);
+          const tsSec = Number(marker.ts);
+          if (!drawdownByTs.has(tsSec)) {
+            drawdownByTs.set(tsSec, []);
           }
-          drawdownByTs.get(marker.ts).push(marker);
+          drawdownByTs.get(tsSec).push(marker);
         });
 
         if (markerData.length) {
@@ -303,7 +311,7 @@ export default function PnlCharts({
             cap: "round",
             join: "round",
           },
-          data: alignedSeriesData(wMap, xData),
+          data: alignedTimeSeriesData(wMap, xData),
         });
       });
     }
@@ -324,7 +332,7 @@ export default function PnlCharts({
           cap: "round",
           join: "round",
         },
-        data: alignedSeriesData(noFeeMap, xData),
+        data: alignedTimeSeriesData(noFeeMap, xData),
       });
     }
 
@@ -345,7 +353,7 @@ export default function PnlCharts({
           cap: "round",
           join: "round",
         },
-        data: alignedSeriesData(yesNoFeeMap, xData),
+        data: alignedTimeSeriesData(yesNoFeeMap, xData),
       });
       series.push({
         name: SIDE_META.NO.noFeeName,
@@ -363,7 +371,7 @@ export default function PnlCharts({
           cap: "round",
           join: "round",
         },
-        data: alignedSeriesData(noNoFeeSideMap, xData),
+        data: alignedTimeSeriesData(noNoFeeSideMap, xData),
       });
 
       walletKeysNoFee.forEach((addr, idx) => {
@@ -385,7 +393,7 @@ export default function PnlCharts({
             cap: "round",
             join: "round",
           },
-          data: alignedSeriesData(wMap, xData),
+          data: alignedTimeSeriesData(wMap, xData),
         });
       });
     }
@@ -421,17 +429,16 @@ export default function PnlCharts({
         containLabel: true,
       },
       xAxis: {
-        type: "category",
+        type: "time",
         position: "bottom",
         boundaryGap: false,
-        data: xData,
         axisLine: {
           onZero: false,
         },
         axisLabel: {
           color: "#617089",
           hideOverlap: true,
-          formatter: axisTimeLabel,
+          formatter: (value) => dayjs(Number(value)).format("MM/DD HH:mm"),
         },
       },
       yAxis: {
@@ -512,7 +519,7 @@ export default function PnlCharts({
             cap: "round",
             join: "round",
           },
-          data: alignedSeriesData(mapsBySymbolNet[symbol], xData),
+          data: alignedTimeSeriesData(mapsBySymbolNet[symbol], xData),
         };
 
         if (showDrawdownMarks) {
@@ -522,23 +529,21 @@ export default function PnlCharts({
               if (!mapsBySymbolNet[symbol].has(marker.ts)) {
                 return null;
               }
-              const tsIndex = xData.indexOf(marker.ts);
-              if (tsIndex < 0) {
-                return null;
-              }
+              const tsSec = Number(marker.ts);
               return {
-                coord: [tsIndex, mapsBySymbolNet[symbol].get(marker.ts)],
-                ts: marker.ts,
+                coord: [tsSec * 1000, mapsBySymbolNet[symbol].get(marker.ts)],
+                ts: tsSec,
                 slug: marker.marketSlug,
                 drawdown: marker.delta,
               };
             })
             .filter(Boolean);
           markerData.forEach((marker) => {
-            if (!drawdownByTs.has(marker.ts)) {
-              drawdownByTs.set(marker.ts, []);
+            const tsSec = Number(marker.ts);
+            if (!drawdownByTs.has(tsSec)) {
+              drawdownByTs.set(tsSec, []);
             }
-            drawdownByTs.get(marker.ts).push(marker);
+            drawdownByTs.get(tsSec).push(marker);
           });
 
           if (markerData.length) {
@@ -594,7 +599,7 @@ export default function PnlCharts({
             cap: "round",
             join: "round",
           },
-          data: alignedSeriesData(mapsBySymbolNoFee[symbol], xData),
+          data: alignedTimeSeriesData(mapsBySymbolNoFee[symbol], xData),
         });
       }
     });
@@ -632,17 +637,16 @@ export default function PnlCharts({
         containLabel: true,
       },
       xAxis: {
-        type: "category",
+        type: "time",
         position: "bottom",
         boundaryGap: false,
-        data: xData,
         axisLine: {
           onZero: false,
         },
         axisLabel: {
           color: "#617089",
           hideOverlap: true,
-          formatter: axisTimeLabel,
+          formatter: (value) => dayjs(Number(value)).format("MM/DD HH:mm"),
         },
       },
       yAxis: {
