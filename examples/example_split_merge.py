@@ -10,7 +10,7 @@ import dotenv
 from py_builder_relayer_client.client import RelayClient
 from py_builder_signing_sdk.config import BuilderConfig
 from py_builder_signing_sdk.sdk_types import BuilderApiKeyCreds
-from py_clob_client_v2 import ClobClient
+from py_clob_client.client import ClobClient
 
 from poly_web3 import RELAYER_URL, PolyWeb3Service
 
